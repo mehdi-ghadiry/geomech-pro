@@ -1,0 +1,14 @@
+# Virtual environment
+venv/
+__pycache__/
+*.pyc
+
+# Secrets & local data -- NEVER commit these
+backend/.secret_key
+backend/geomech.db
+.env
+
+# OS / editor noise
+.DS_Store
+.vscode/
+*.log

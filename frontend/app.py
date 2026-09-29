@@ -1,0 +1,620 @@
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+from plotly.subplots import make_subplots
+
+import api_client
+from api_client import BackendError
+from config import (
+    DEVELOPER_EMAIL,
+    DEVELOPER_NAME,
+    DEVELOPER_TITLE,
+    DEVELOPER_WHATSAPP,
+    PLATFORM_NAME,
+)
+
+# Page Configuration
+st.set_page_config(
+    page_title="GeoMech Pro | 1D MEM & Wellbore Stability",
+    page_icon="⚒️",
+    layout="wide",
+)
+
+# Header Section
+st.title("⚒️ GeoMech Pro: 1D Mechanical Earth Model & Wellbore Stability")
+st.caption(f"Advanced Subsurface Geomechanics & 2D Kirsch Stress Simulation | Lead Developer: **{DEVELOPER_NAME}**")
+st.markdown("---")
+
+# --- Session state defaults (auth + saved-well viewing) ---
+st.session_state.setdefault("auth_token", None)
+st.session_state.setdefault("username", None)
+st.session_state.setdefault("loaded_well_id", None)
+st.session_state.setdefault("loaded_well_name", None)
+
+# Sidebar: Account (login / register / saved wells)
+with st.sidebar:
+    st.header("🔐 Account")
+
+    if st.session_state["auth_token"]:
+        st.success(f"Logged in as **{st.session_state['username']}**")
+        if st.button("Log out", use_container_width=True):
+            st.session_state["auth_token"] = None
+            st.session_state["username"] = None
+            st.session_state["loaded_well_id"] = None
+            st.rerun()
+
+        # --- Saved wells for this user ---
+        st.subheader("📚 My Saved Wells")
+        try:
+            saved_wells = api_client.list_wells(st.session_state["auth_token"])
+        except BackendError as e:
+            saved_wells = []
+            st.error(f"Could not load saved wells: {e}")
+
+        if not saved_wells:
+            st.caption("No saved wells yet. Compute a well below, then save it here.")
+        else:
+            for w in saved_wells:
+                wcol1, wcol2 = st.columns([3, 1])
+                wcol1.write(f"**{w['well_name']}**\n\n{w['created_at'][:10]}")
+                if wcol2.button("Open", key=f"open_well_{w['id']}", use_container_width=True):
+                    st.session_state["loaded_well_id"] = w["id"]
+                    st.rerun()
+                if wcol2.button("🗑️", key=f"delete_well_{w['id']}", use_container_width=True):
+                    try:
+                        api_client.delete_well(st.session_state["auth_token"], w["id"])
+                        if st.session_state["loaded_well_id"] == w["id"]:
+                            st.session_state["loaded_well_id"] = None
+                        st.rerun()
+                    except BackendError as e:
+                        st.error(f"Could not delete: {e}")
+    else:
+        auth_tab_login, auth_tab_register = st.tabs(["Log in", "Register"])
+        with auth_tab_login:
+            with st.form("login_form"):
+                login_username = st.text_input("Username")
+                login_password = st.text_input("Password", type="password")
+                if st.form_submit_button("Log in", use_container_width=True):
+                    try:
+                        result = api_client.login(login_username, login_password)
+                        st.session_state["auth_token"] = result["access_token"]
+                        st.session_state["username"] = result["username"]
+                        st.rerun()
+                    except BackendError as e:
+                        st.error(str(e))
+        with auth_tab_register:
+            with st.form("register_form"):
+                reg_username = st.text_input("Choose a username")
+                reg_email = st.text_input("Email")
+                reg_password = st.text_input("Choose a password", type="password")
+                if st.form_submit_button("Create account", use_container_width=True):
+                    try:
+                        result = api_client.register(reg_username, reg_email, reg_password)
+                        st.session_state["auth_token"] = result["access_token"]
+                        st.session_state["username"] = result["username"]
+                        st.rerun()
+                    except BackendError as e:
+                        st.error(str(e))
+        st.caption("Guest mode works without an account -- you just can't save results.")
+
+    st.markdown("---")
+
+# Sidebar Configuration
+with st.sidebar:
+    st.header("📂 Well Data & Calibration")
+    st.info(
+        f"👨‍💻 **Developer:** {DEVELOPER_NAME}\n\n"
+        f"🎓 {DEVELOPER_TITLE}\n\n"
+        f"✉ **Email:** {DEVELOPER_EMAIL}\n\n"
+        f"**WhatsApp:** {DEVELOPER_WHATSAPP}\n\n"
+    )
+
+    uploaded_file = st.file_uploader(
+        "Upload Well Log Data (LAS, CSV, TXT, XLSX)",
+        type=["las", "csv", "txt", "xlsx"],
+        help="Upload a LAS log or a tabular export with a header row. Required curves: depth, DT, and RHOB; DTS is optional.",
+    )
+
+    st.subheader("⚙️ Log Units & In-Situ Calibration")
+    sonic_unit = st.selectbox("Sonic Unit", ["us/ft", "us/m"], index=0)
+    density_unit = st.selectbox("Density Unit", ["g/cm3", "kg/m3"], index=0)
+
+    with st.expander("🛠️ Advanced Geomechanics Parameters", expanded=False):
+        biot_alpha = st.slider("Biot's Coefficient (α)", 0.5, 1.0, 1.0, 0.05)
+        dt_normal = st.number_input("Normal Compaction DT (μs/ft)", value=100.0, step=5.0)
+        eaton_exp = st.slider("Eaton's Exponent", 1.0, 5.0, 3.0, 0.1)
+        assumed_shallow_density = st.number_input(
+            "Assumed Shallow Density Above Log Top (g/cm3)",
+            value=2.0, step=0.05, format="%.2f",
+            help="The log usually doesn't start at the surface. This estimates the "
+                 "overburden weight of everything above the top of the log using a "
+                 "typical near-surface sediment density.",
+        )
+        tectonic_ex = st.number_input("Tectonic Strain εx (SHmax direction)", value=0.0005, format="%.5f")
+
+        use_lot_calibration = st.checkbox(
+            "📏 Calibrate εy with a LOT/FIT measurement",
+            help="If you have a real Leak-Off Test or Formation Integrity Test result, "
+                 "enter it below instead of guessing εy -- the model solves for the "
+                 "tectonic strain that reproduces it exactly at that depth.",
+        )
+        if use_lot_calibration:
+            lot_depth_input = st.number_input("LOT/FIT Depth (m)", value=2000.0, step=10.0)
+            lot_pressure_input = st.number_input(
+                "LOT/FIT Pressure (MPa)", value=30.0, step=0.5,
+                help="Convert from EMW (SG) if needed: pressure_MPa = EMW_SG × depth_m × 0.00980665",
+            )
+            tectonic_ey = None  # solved by the backend, not user-entered
+        else:
+            tectonic_ey = st.number_input("Tectonic Strain εy (Shmin direction)", value=0.0002, format="%.5f")
+            lot_depth_input = None
+            lot_pressure_input = None
+
+results_df = None
+active_well_name = None
+compute_params_used = None
+data_source = None  # "upload" or "saved"
+
+if st.session_state["loaded_well_id"] is not None:
+    # --- Viewing a previously saved well from the user's account ---
+    try:
+        well_detail = api_client.get_well(st.session_state["auth_token"], st.session_state["loaded_well_id"])
+        results_df = pd.DataFrame(well_detail["results"]).apply(pd.to_numeric, errors="coerce")
+        active_well_name = well_detail["well_name"]
+        compute_params_used = well_detail.get("params", {})
+        data_source = "saved"
+        st.info(f"📚 Viewing saved well **{active_well_name}** from your account.")
+        if st.button("🔙 Close saved well and upload a new file instead"):
+            st.session_state["loaded_well_id"] = None
+            st.rerun()
+    except BackendError as e:
+        st.error(f"❌ Could not load saved well: {e}")
+        st.session_state["loaded_well_id"] = None
+
+elif uploaded_file is not None:
+    try:
+        file_bytes = uploaded_file.getvalue()
+
+        # --- Step 1: ask the backend which curves this file contains ---
+        with st.spinner("Reading well-log file on server..."):
+            col_info = api_client.get_las_columns(file_bytes, uploaded_file.name)
+        columns = col_info["columns"]
+        st.sidebar.success(f"✅ Well-log data loaded ({col_info['row_count']} rows)!")
+
+        def find_default(candidates, cols):
+            for c in candidates:
+                for col in cols:
+                    if c.lower() in col.lower():
+                        return col
+            return cols[0] if cols else ""
+
+        dept_col = find_default(["dept", "depth"], columns)
+        dt_col = find_default(["dt", "dtco"], columns)
+        dts_col = find_default(["dts", "dtsm"], columns)
+        rhob_col = find_default(["rhob", "den"], columns)
+
+        st.sidebar.subheader("🎯 Curve Mapping")
+        sel_dept = st.sidebar.selectbox("Depth (MD/TVD)", columns, index=columns.index(dept_col) if dept_col in columns else 0)
+        sel_dt = st.sidebar.selectbox("Compressional Sonic (DT)", columns, index=columns.index(dt_col) if dt_col in columns else 0)
+        sel_dts = st.sidebar.selectbox("Shear Sonic (DTS)", ["None"] + columns, index=(columns.index(dts_col) + 1) if dts_col in columns else 0)
+        sel_rhob = st.sidebar.selectbox("Bulk Density (RHOB)", columns, index=columns.index(rhob_col) if rhob_col in columns else 0)
+
+        dts_actual = None if sel_dts == "None" else sel_dts
+
+        # --- Step 2: send the file + column mapping + parameters to the
+        #     backend and get the computed 1D MEM back as JSON ---
+        compute_params = {
+            "depth_col": sel_dept,
+            "dt_col": sel_dt,
+            "rhob_col": sel_rhob,
+            "dts_col": dts_actual or "",
+            "biot_alpha": biot_alpha,
+            "dt_matrix": dt_normal,
+            "eaton_n": eaton_exp,
+            "tectonic_ex": tectonic_ex,
+            "sonic_unit": sonic_unit,
+            "density_unit": density_unit,
+            "assumed_shallow_density": assumed_shallow_density,
+        }
+        if use_lot_calibration:
+            compute_params["lot_depth"] = lot_depth_input
+            compute_params["lot_pressure_mpa"] = lot_pressure_input
+            # tectonic_ey is intentionally omitted -- the backend solves it
+        else:
+            compute_params["tectonic_ey"] = tectonic_ey
+
+        with st.spinner("Computing 1D MEM on server..."):
+            compute_result = api_client.compute_mem(file_bytes, uploaded_file.name, compute_params)
+
+        results_df = pd.DataFrame(compute_result["results"])
+        # JSON round-trip turns NaN into None -- restore proper numeric dtypes.
+        results_df = results_df.apply(pd.to_numeric, errors="coerce")
+        active_well_name = uploaded_file.name
+        compute_params_used = compute_params
+        data_source = "upload"
+
+        calib_info = compute_result.get("calibration")
+        if calib_info:
+            if calib_info["within_range"]:
+                st.success(
+                    f"📏 Calibrated using your LOT/FIT point at {calib_info['matched_depth']:.1f} m — "
+                    f"solved tectonic εy = {calib_info['tectonic_ey']:.6f} (was {calib_info['uncalibrated_shmin_mpa']:.1f} MPa "
+                    f"before calibration)."
+                )
+            else:
+                st.warning(
+                    f"⚠️ Your LOT/FIT pressure isn't physically achievable at {calib_info['matched_depth']:.1f} m "
+                    f"given this well's pore pressure and overburden -- the valid range there is "
+                    f"{calib_info['achievable_min_mpa']:.1f}–{calib_info['achievable_max_mpa']:.1f} MPa. "
+                    f"The result has been clamped to the nearest valid value, so Shmin will NOT exactly match "
+                    f"what you entered. Double-check the LOT/FIT depth and pressure, or the Eaton pore-pressure "
+                    f"parameters for this well."
+                )
+
+    except BackendError as e:
+        st.error(f"❌ Backend Connection/Computation Error: {e}")
+        st.info(f"The backend at `{api_client.BACKEND_URL}` is unreachable or returned an error. Make sure the FastAPI service is running.")
+    except Exception as e:
+        st.error(f"❌ Execution Error: {str(e)}")
+
+if results_df is not None:
+    try:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Depth Interval", f"{results_df['Depth'].min():.0f} - {results_df['Depth'].max():.0f} m")
+        c2.metric("Mean Sv", f"{results_df['Overburden_Stress_Sv_MPa'].mean():.1f} MPa" if "Overburden_Stress_Sv_MPa" in results_df else "N/A")
+        c3.metric("Mean Pore Press", f"{results_df['Pore_Pressure_Pp_MPa'].mean():.1f} MPa" if "Pore_Pressure_Pp_MPa" in results_df else "N/A")
+        c4.metric("Recommended Mud Min", f"{results_df['Collapse_EMW_SG'].mean():.2f} SG" if "Collapse_EMW_SG" in results_df else "N/A")
+        c5.metric("Safe Frac Margin", f"{results_df['Shmin_EMW_SG'].mean():.2f} SG" if "Shmin_EMW_SG" in results_df else "N/A")
+
+        # Tab Structure
+        tab1, tab2 = st.tabs([
+            "📊 1D MEM & Mud Weight Window Logs",
+            "🎯 2D Wellbore Stress & Failure Simulator (Kirsch & Mohr-Coulomb)"
+        ])
+
+        # ==========================================
+        # TAB 1: Continuous 1D Logs
+        # ==========================================
+        with tab1:
+            st.markdown("### 📊 4-Track 1D MEM & Safe Mud Weight Window")
+            fig = make_subplots(
+                rows=1,
+                cols=4,
+                shared_yaxes=True,
+                horizontal_spacing=0.04,
+                subplot_titles=(
+                    "Track 1: Elastic Moduli",
+                    "Track 2: Rock Strength (UCS)",
+                    "Track 3: In-Situ Stresses (MPa)",
+                    "Track 4: Mud Weight Window (SG)",
+                ),
+            )
+
+            depth = results_df["Depth"]
+
+            # Track 1: Elastic Moduli
+            if "Youngs_Modulus_GPa" in results_df:
+                fig.add_trace(go.Scatter(x=results_df["Youngs_Modulus_GPa"], y=depth, name="Young's (E)", line=dict(color="#00E5FF", width=1.5)), row=1, col=1)
+            if "Bulk_Modulus_GPa" in results_df:
+                fig.add_trace(go.Scatter(x=results_df["Bulk_Modulus_GPa"], y=depth, name="Bulk (K)", line=dict(color="#FFD700", width=1.2, dash="dot")), row=1, col=1)
+            if "Shear_Modulus_GPa" in results_df:
+                fig.add_trace(go.Scatter(x=results_df["Shear_Modulus_GPa"], y=depth, name="Shear (G)", line=dict(color="#FF9100", width=1.2, dash="dash")), row=1, col=1)
+
+            # Track 2: Rock Strength
+            if "UCS_MPa" in results_df:
+                fig.add_trace(go.Scatter(x=results_df["UCS_MPa"], y=depth, name="UCS (MPa)", line=dict(color="#AB47BC", width=2)), row=1, col=2)
+            if "Tensile_Strength_MPa" in results_df:
+                fig.add_trace(go.Scatter(x=results_df["Tensile_Strength_MPa"], y=depth, name="Tensile (To)", line=dict(color="#BA68C8", width=1.2, dash="dot")), row=1, col=2)
+
+            # Track 3: Stresses
+            if "Pore_Pressure_Pp_MPa" in results_df:
+                fig.add_trace(go.Scatter(x=results_df["Pore_Pressure_Pp_MPa"], y=depth, name="Pore Press (Pp)", line=dict(color="#00E676", width=2)), row=1, col=3)
+            if "Shmin_MPa" in results_df:
+                fig.add_trace(go.Scatter(x=results_df["Shmin_MPa"], y=depth, name="Shmin (σh)", line=dict(color="#2979FF", width=1.5, dash="dash")), row=1, col=3)
+            if "SHmax_MPa" in results_df:
+                fig.add_trace(go.Scatter(x=results_df["SHmax_MPa"], y=depth, name="SHmax (σH)", line=dict(color="#FF6E40", width=1.5, dash="dash")), row=1, col=3)
+            if "Overburden_Stress_Sv_MPa" in results_df:
+                fig.add_trace(go.Scatter(x=results_df["Overburden_Stress_Sv_MPa"], y=depth, name="Overburden (Sv)", line=dict(color="#D50000", width=2)), row=1, col=3)
+
+            # Track 4: Mud Weight Window
+            if "Pore_Pressure_EMW_SG" in results_df:
+                fig.add_trace(go.Scatter(x=results_df["Pore_Pressure_EMW_SG"], y=depth, name="Pore Press EMW", line=dict(color="#00E676", width=1.5, dash="dot")), row=1, col=4)
+            if "Collapse_EMW_SG" in results_df:
+                fig.add_trace(go.Scatter(x=results_df["Collapse_EMW_SG"], y=depth, name="Shear Collapse (Min MW)", line=dict(color="#FF1744", width=2)), row=1, col=4)
+            if "Shmin_EMW_SG" in results_df:
+                fig.add_trace(go.Scatter(x=results_df["Shmin_EMW_SG"], y=depth, name="Losses Limit (Shmin)", line=dict(color="#FF9100", width=1.8, dash="dash")), row=1, col=4)
+            if "Fracture_EMW_SG" in results_df:
+                fig.add_trace(go.Scatter(x=results_df["Fracture_EMW_SG"], y=depth, name="Fracture Breakdown", line=dict(color="#2979FF", width=1.5, dash="dot")), row=1, col=4)
+
+            fig.update_yaxes(title_text="Depth (m)", autorange="reversed", row=1, col=1)
+            fig.update_xaxes(title_text="Moduli (GPa)", row=1, col=1)
+            fig.update_xaxes(title_text="Strength (MPa)", row=1, col=2)
+            fig.update_xaxes(title_text="Stress (MPa)", row=1, col=3)
+            fig.update_xaxes(title_text="EMW (SG)", row=1, col=4)
+
+            fig.update_layout(
+                height=800,
+                hovermode="y unified",
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.08,
+                    xanchor="center",
+                    x=0.5,
+                    font=dict(size=11),
+                ),
+                margin=dict(l=50, r=40, t=120, b=60),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        # ==========================================
+        # TAB 2: 2D Kirsch & Mohr-Coulomb Simulator
+        # ==========================================
+        with tab2:
+            st.markdown("### 🔬 2D Near-Wellbore Elastic Stress & Failure Field")
+            st.write(
+                "This interactive tool simulates the analytical **Kirsch stress distribution** and evaluates "
+                "the **Mohr-Coulomb Failure Index (MCI)** around the borehole."
+            )
+
+            # UI Controls
+            col_depth, col_mud, col_r = st.columns(3)
+            with col_depth:
+                target_depth = st.slider(
+                    "Select Depth (m)",
+                    float(results_df["Depth"].min()),
+                    float(results_df["Depth"].max()),
+                    float(results_df["Depth"].mean()),
+                    step=0.5,
+                )
+
+            # Locate nearest row in results
+            nearest_idx = (results_df["Depth"] - target_depth).abs().idxmin()
+            row_data = results_df.loc[nearest_idx]
+
+            # Defensive Value Extractor
+            def get_val(key_list, default_val):
+                for k in key_list:
+                    if k in row_data.index:
+                        val = row_data[k]
+                        if not pd.isna(val) and not np.isinf(val):
+                            return float(val)
+                return float(default_val)
+
+            rec_collapse = get_val(["Collapse_EMW_SG"], 1.15)
+            rec_frac = get_val(["Fracture_EMW_SG", "Shmin_EMW_SG"], 1.85)
+
+            with col_mud:
+                sim_mud_sg = st.slider(
+                    "Test Drilling Mud Weight (SG)",
+                    0.80,
+                    2.50,
+                    float(np.clip(rec_collapse + 0.05, 0.90, 2.30)),
+                    0.02,
+                )
+
+            with col_r:
+                well_dia_inch = st.selectbox("Wellbore Diameter (inches)", [6.0, 8.5, 12.25, 17.5], index=1)
+                Rw = (well_dia_inch * 0.0254) / 2.0
+
+            # Extract Formation Parameters safely
+            sv = get_val(["Overburden_Stress_Sv_MPa", "Sv_MPa"], 50.0)
+            shmin = get_val(["Shmin_MPa"], 32.0)
+            shmax = get_val(["SHmax_MPa"], 42.0)
+            pp = get_val(["Pore_Pressure_Pp_MPa", "Pp_MPa"], 22.0)
+            ucs = get_val(["UCS_MPa"], 45.0)
+            friction_ang = get_val(["Friction_Angle_deg", "Phi_deg", "Internal_Friction_deg"], 30.0)
+
+            # Mud pressure calculation: Pw (MPa) = rho (kg/m3) * g * depth / 1e6
+            pw = (sim_mud_sg * 1000.0) * 9.80665 * target_depth / 1e6
+
+            # Diagnostic Status
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Local UCS", f"{ucs:.1f} MPa")
+            m2.metric("Pore Pressure (Pp)", f"{pp:.1f} MPa")
+            m3.metric("Current Mud Press (Pw)", f"{pw:.1f} MPa")
+
+            if sim_mud_sg < rec_collapse:
+                stability_status = "⚠️ Shear Breakout (MW Too Low)"
+            elif sim_mud_sg > rec_frac:
+                stability_status = "💥 Tensile Fracture (MW Too High)"
+            else:
+                stability_status = "✅ Borehole Stable"
+            m4.metric("Stability State", stability_status)
+
+            # Cartesian Grid Formulation for Kirsch Solution
+            max_r = Rw * 3.0
+            grid_points = 80
+            x_axis = np.linspace(-max_r, max_r, grid_points)
+            y_axis = np.linspace(-max_r, max_r, grid_points)
+            X, Y = np.meshgrid(x_axis, y_axis)
+            R = np.sqrt(X**2 + Y**2)
+            THETA = np.arctan2(Y, X)
+
+            mask_hole = R < Rw
+            safe_R = np.where(mask_hole, Rw, R)
+            eta = (Rw / safe_R) ** 2
+
+            s_mean = (shmax + shmin) / 2.0
+            s_diff = (shmax - shmin) / 2.0
+
+            # Kirsch Equations
+            sig_r = s_mean * (1.0 - eta) + s_diff * (1.0 - 4.0 * eta + 3.0 * (eta**2)) * np.cos(2.0 * THETA) + pw * eta
+            sig_th = s_mean * (1.0 + eta) - s_diff * (1.0 + 3.0 * (eta**2)) * np.cos(2.0 * THETA) - pw * eta
+            tau_rth = -s_diff * (1.0 + 2.0 * eta - 3.0 * (eta**2)) * np.sin(2.0 * THETA)
+
+            # Effective Stresses
+            sig_r_eff = sig_r - pp
+            sig_th_eff = sig_th - pp
+
+            # Principal In-Plane Stresses
+            c_stress = (sig_r_eff + sig_th_eff) / 2.0
+            rad_diff = np.sqrt(((sig_r_eff - sig_th_eff) / 2.0) ** 2 + tau_rth**2)
+            sig1_eff = c_stress + rad_diff
+            sig3_eff = c_stress - rad_diff
+
+            # Mohr-Coulomb Failure Index (MCI >= 1.0 means failure)
+            phi_rad = np.radians(friction_ang)
+            q_mc = np.tan(np.pi / 4.0 + phi_rad / 2.0) ** 2
+            mc_strength = q_mc * np.maximum(sig3_eff, 0.0) + ucs
+            mci = sig1_eff / np.maximum(mc_strength, 1e-4)
+
+            # Mask interior of wellbore
+            sig_th_eff[mask_hole] = np.nan
+            mci[mask_hole] = np.nan
+
+            # 2D Visuals
+            fig_sim = make_subplots(
+                rows=1,
+                cols=2,
+                subplot_titles=(
+                    "Effective Hoop Stress σ'θ (MPa)",
+                    "Mohr-Coulomb Failure Index (MCI ≥ 1.0 = Failure)",
+                ),
+                horizontal_spacing=0.12,
+            )
+
+            # Contour 1: Hoop Stress
+            fig_sim.add_trace(
+                go.Contour(
+                    z=sig_th_eff,
+                    x=x_axis,
+                    y=y_axis,
+                    colorscale="Viridis",
+                    contours=dict(showlines=False),
+                    colorbar=dict(title="σ'θ (MPa)", x=0.44),
+                ),
+                row=1,
+                col=1,
+            )
+
+            # Borehole boundary 1
+            circle_theta = np.linspace(0, 2 * np.pi, 100)
+            fig_sim.add_trace(
+                go.Scatter(
+                    x=Rw * np.cos(circle_theta),
+                    y=Rw * np.sin(circle_theta),
+                    fill="toself",
+                    fillcolor="rgba(30, 30, 30, 0.9)",
+                    line=dict(color="#FFFFFF", width=2),
+                    name="Wellbore Wall",
+                ),
+                row=1,
+                col=1,
+            )
+
+            # Contour 2: Mohr-Coulomb Index
+            fig_sim.add_trace(
+                go.Contour(
+                    z=mci,
+                    x=x_axis,
+                    y=y_axis,
+                    colorscale="Turbo",
+                    contours=dict(start=0.5, end=1.5, size=0.1, showlines=True),
+                    colorbar=dict(title="MCI", x=1.0),
+                ),
+                row=1,
+                col=2,
+            )
+
+            # Borehole boundary 2
+            fig_sim.add_trace(
+                go.Scatter(
+                    x=Rw * np.cos(circle_theta),
+                    y=Rw * np.sin(circle_theta),
+                    fill="toself",
+                    fillcolor="rgba(30, 30, 30, 0.9)",
+                    line=dict(color="#FFFFFF", width=2),
+                    showlegend=False,
+                ),
+                row=1,
+                col=2,
+            )
+
+            fig_sim.update_layout(
+                height=550,
+                margin=dict(l=30, r=30, t=60, b=40),
+            )
+            fig_sim.update_xaxes(title_text="X (m) [SHmax Direction →]", scaleanchor="y", row=1, col=1)
+            fig_sim.update_yaxes(title_text="Y (m) [Shmin Direction ↑]", row=1, col=1)
+            fig_sim.update_xaxes(title_text="X (m) [SHmax Direction →]", scaleanchor="y", row=1, col=2)
+            fig_sim.update_yaxes(title_text="Y (m) [Shmin Direction ↑]", row=1, col=2)
+
+            st.plotly_chart(fig_sim, use_container_width=True)
+
+        # ==========================================
+        # Export Section
+        # ==========================================
+        st.markdown("### 📑 Data Export & Engineering Reports")
+        col_csv, col_pdf = st.columns(2)
+
+        base_name = active_well_name.rsplit(".", 1)[0] if active_well_name else "Well"
+
+        with col_csv:
+            csv_data = results_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="📥 Download Full Geomechanical Dataset (CSV)",
+                data=csv_data,
+                file_name="GeoMech_Full_1D_MEM_MWW_Results.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        with col_pdf:
+            if st.button("📄 Generate PDF Report", use_container_width=True):
+                with st.spinner("Generating PDF report on server..."):
+                    pdf_bytes = api_client.generate_report_pdf(
+                        results_df.to_dict(orient="records"), base_name
+                    )
+                st.download_button(
+                    label="📥 Download PDF Report",
+                    data=pdf_bytes,
+                    file_name=f"GeoMech_Full_Report_{base_name}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+
+        with st.expander("📋 View Complete 1D MEM & Stability Data Table"):
+            st.dataframe(results_df, use_container_width=True)
+
+        # ==========================================
+        # Save to Account (only for a freshly computed well, not one
+        # already loaded from the account)
+        # ==========================================
+        if data_source == "upload":
+            st.markdown("### 💾 Save to Your Account")
+            if st.session_state["auth_token"]:
+                save_name = st.text_input("Save this well as", value=base_name, key="save_well_name_input")
+                if st.button("Save to My Wells", use_container_width=True):
+                    try:
+                        api_client.save_well(
+                            st.session_state["auth_token"],
+                            save_name,
+                            compute_params_used,
+                            results_df.to_dict(orient="records"),
+                        )
+                        st.success(f"✅ Saved '{save_name}' to your account. Find it in the sidebar under 'My Saved Wells'.")
+                    except BackendError as e:
+                        st.error(f"❌ Could not save: {e}")
+            else:
+                st.info("🔐 Log in from the sidebar to save this well's results to your account for later.")
+
+    except BackendError as e:
+        st.error(f"❌ Backend Connection/Computation Error: {e}")
+        st.info(f"The backend at `{api_client.BACKEND_URL}` is unreachable or returned an error. Make sure the FastAPI service is running.")
+    except Exception as e:
+        st.error(f"❌ Execution Error: {str(e)}")
+
+else:
+    st.info("👆 Upload a `.las` well log file from the sidebar, or open a saved well from your account, to generate the 1D MEM & Mud Weight Window.")
+
+st.markdown("---")
+st.markdown(
+    f"""
+    <div style="text-align: center; color: #888; font-size: 0.9rem;">
+        {PLATFORM_NAME} • Developed by <strong>{DEVELOPER_NAME}</strong> | Petroleum Geomechanics Specialist
+    </div>
+    """,
+    unsafe_allow_html=True,
+)

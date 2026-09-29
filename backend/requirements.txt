@@ -1,0 +1,10 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+pandas>=2.0
+openpyxl>=3.1
+numpy>=1.24
+lasio>=0.31
+fpdf2>=2.7
+sqlalchemy>=2.0
+PyJWT>=2.8
