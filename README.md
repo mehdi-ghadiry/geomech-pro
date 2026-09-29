@@ -1,4 +1,3 @@
-# GeoMech Pro — معماری Backend/Frontend جدا
 GeoMechanics_SaaS/
 ├── backend/                 
 │   ├── main.py               
