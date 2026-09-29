@@ -1,6 +1,29 @@
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import subprocess
+import sys
+import time
+import socket
+
+def is_backend_running(host="127.0.0.1", port=8000):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex((host, port)) == 0
+
+def start_backend():
+    if not is_backend_running():
+        # Start FastAPI backend in the background
+        subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8000"]
+        )
+        # Wait up to 5 seconds for backend to become healthy
+        for _ in range(10):
+            if is_backend_running():
+                break
+            time.sleep(0.5)
+
+start_backend()
+
 import streamlit as st
 from plotly.subplots import make_subplots
 
