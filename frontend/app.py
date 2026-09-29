@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 import socket
+import os
 
 def is_backend_running(host="127.0.0.1", port=8000):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -12,12 +13,15 @@ def is_backend_running(host="127.0.0.1", port=8000):
 
 def start_backend():
     if not is_backend_running():
-        # Start FastAPI backend in the background
+        # Set environment to include backend in PYTHONPATH
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.path.abspath("backend") + os.pathsep + env.get("PYTHONPATH", "")
+        
         subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8000"]
+            [sys.executable, "-m", "uvicorn", "main:app", "--app-dir", "backend", "--host", "127.0.0.1", "--port", "8000"],
+            env=env
         )
-        # Wait up to 5 seconds for backend to become healthy
-        for _ in range(10):
+        for _ in range(15):
             if is_backend_running():
                 break
             time.sleep(0.5)
