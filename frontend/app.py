@@ -740,3 +740,46 @@ if results_df is not None:
 
     except Exception as e:
         st.error(f"Visualization rendering error: {str(e)}")
+# ==========================================
+# Export & Reporting Section (English Only)
+# ==========================================
+st.markdown("---")
+st.subheader("📑 Geomechanical Reporting & Data Export")
+
+col_exp1, col_exp2 = st.columns([1, 1])
+
+# Export Processed CSV Data
+with col_exp1:
+    if "mem_df" in st.session_state and st.session_state["mem_df"] is not None:
+        csv_data = st.session_state["mem_df"].to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download Processed Log Data (CSV)",
+            data=csv_data,
+            file_name="1D_MEM_Log_Data.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
+# Export Formal Engineering PDF Report
+with col_exp2:
+    if "mem_df" in st.session_state and st.session_state["mem_df"] is not None:
+        try:
+            from report_generator import generate_mem_report
+            
+            # Well name identification
+            well_id = "TEST_WELL_A-1"
+            if "uploaded_file" in locals() and uploaded_file is not None:
+                well_id = uploaded_file.name.replace(".las", "").replace(".csv", "")
+            
+            pdf_bytes = generate_mem_report(st.session_state["mem_df"], well_name=well_id)
+            
+            st.download_button(
+                label="📄 Download 1D MEM Report (PDF)",
+                data=pdf_bytes,
+                file_name=f"{well_id}_MEM_Report.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+        except Exception as e:
+            st.warning(f"Report generation note: {e}")
+
