@@ -521,10 +521,12 @@ class GeomechanicsCore:
         final_pw = collapse_mw * mpam_per_m * depth_use
         final_kir = self._kirsch_wall_stresses(sigma_well, pp, final_pw, nu, theta)
 
-        return {
-            "collapse_emw_sg": collapse_mw,
-            "theta_rad": theta,
-            "sigma_tt_eff": final_kir["sigma_tt_eff"],
-        }
+        # Calculate final state with the determined collapse mud weight
+        final_pw = collapse_mw * mpam_per_m * depth_use
+        final_kir = self._kirsch_wall_stresses(sigma_well, pp, final_pw, nu, theta)
 
-   ta, "sigma_tt_eff": kir["sigma_tt_eff"]}
+        return {
+            "collapse_emw_sg": float(collapse_mw),
+            "theta_rad": theta.tolist() if hasattr(theta, "tolist") else list(theta),
+            "sigma_tt_eff": final_kir["sigma_tt_eff"].tolist() if hasattr(final_kir["sigma_tt_eff"], "tolist") else list(final_kir["sigma_tt_eff"]),
+        }
