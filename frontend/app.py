@@ -741,37 +741,36 @@ if results_df is not None:
     except Exception as e:
         st.error(f"Visualization rendering error: {str(e)}")
 # ==========================================
-# Export & Reporting Section (English Only)
+# Geomechanical Reporting & Data Export
 # ==========================================
 st.markdown("---")
 st.subheader("📑 Geomechanical Reporting & Data Export")
 
 col_exp1, col_exp2 = st.columns([1, 1])
 
-# Export Processed CSV Data
-with col_exp1:
-    if "mem_df" in st.session_state and st.session_state["mem_df"] is not None:
-        csv_data = st.session_state["mem_df"].to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Processed Log Data (CSV)",
-            data=csv_data,
-            file_name="1D_MEM_Log_Data.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+# پیدا کردن دیتافریم فعال حاصل از محاسبات
+active_df = None
+if "mem_df" in st.session_state and st.session_state["mem_df"] is not None:
+    active_df = st.session_state["mem_df"]
+elif "results_df" in locals() and locals()["results_df"] is not None:
+    active_df = locals()["results_df"]
+elif "df" in locals() and locals()["df"] is not None:
+    active_df = locals()["df"]
 
-# Export Formal Engineering PDF Report
-with col_exp2:
-    if "mem_df" in st.session_state and st.session_state["mem_df"] is not None:
+if active_df is not None:
+    # 1. دانلود گزارش رسمی PDF با تابع موجود در ریپازیتوری شما
+    with col_exp1:
         try:
-            from report_generator import generate_mem_report
+            import sys
+            import os
+            sys.path.append(os.path.abspath("backend"))
+            from report_generator import generate_pdf_report
             
-            # Well name identification
             well_id = "TEST_WELL_A-1"
-            if "uploaded_file" in locals() and uploaded_file is not None:
-                well_id = uploaded_file.name.replace(".las", "").replace(".csv", "")
-            
-            pdf_bytes = generate_mem_report(st.session_state["mem_df"], well_name=well_id)
+            if uploaded_file is not None:
+                well_id = uploaded_file.name.rsplit(".", 1)[0]
+                
+            pdf_bytes = generate_pdf_report(active_df, well_name=well_id)
             
             st.download_button(
                 label="📄 Download 1D MEM Report (PDF)",
@@ -781,5 +780,15 @@ with col_exp2:
                 use_container_width=True
             )
         except Exception as e:
-            st.warning(f"Report generation note: {e}")
+            st.error(f"Error generating PDF: {e}")
 
+    # 2. دانلود فایل CSV داده‌ها
+    with col_exp2:
+        csv_data = active_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download Processed Log Data (CSV)",
+            data=csv_data,
+            file_name=f"{well_id}_Log_Data.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
