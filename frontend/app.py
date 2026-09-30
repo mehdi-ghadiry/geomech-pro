@@ -43,14 +43,14 @@ from config import (
 
 # Page Configuration
 st.set_page_config(
-    page_title="GeoMech Pro | 1D MEM & Wellbore Stability",
+    page_title="GeoMech Pro | 1D MEM & Deviated Wellbore Stability",
     page_icon="⚒️",
     layout="wide",
 )
 
 # Header Section
 st.title("⚒️ GeoMech Pro: 1D Mechanical Earth Model & Wellbore Stability")
-st.caption(f"Advanced Subsurface Geomechanics & 2D Kirsch Stress Simulation | Lead Developer: **{DEVELOPER_NAME}**")
+st.caption(f"Advanced Subsurface Geomechanics & 3D Deviated Wellbore Simulator | Lead Developer: **{DEVELOPER_NAME}**")
 st.markdown("---")
 
 # --- Session state defaults (auth + saved-well viewing) ---
@@ -146,6 +146,33 @@ with st.sidebar:
     st.subheader("⚙️ Log Units & In-Situ Calibration")
     sonic_unit = st.selectbox("Sonic Unit", ["us/ft", "us/m"], index=0)
     density_unit = st.selectbox("Density Unit", ["g/cm3", "kg/m3"], index=0)
+
+    # 🧭 Wellbore Trajectory Inputs for Deviated/Horizontal Wells
+    st.subheader("🧭 Well Trajectory & In-Situ Azimuth")
+    well_inclination = st.slider(
+        "Well Inclination θ (°)",
+        min_value=0.0,
+        max_value=90.0,
+        value=0.0,
+        step=5.0,
+        help="0° = Vertical Well, 90° = Horizontal Well."
+    )
+    well_azimuth = st.slider(
+        "Well Azimuth φ (°)",
+        min_value=0.0,
+        max_value=360.0,
+        value=0.0,
+        step=5.0,
+        help="Well trajectory direction relative to True North (0°=N, 90°=E)."
+    )
+    shmax_azimuth = st.slider(
+        "SHmax Azimuth (°)",
+        min_value=0.0,
+        max_value=180.0,
+        value=45.0,
+        step=5.0,
+        help="Maximum horizontal stress orientation relative to True North."
+    )
 
     with st.expander("🛠️ Advanced Geomechanics Parameters", expanded=False):
         biot_alpha = st.slider("Biot's Coefficient (α)", 0.5, 1.0, 1.0, 0.05)
@@ -243,19 +270,20 @@ elif uploaded_file is not None:
             "sonic_unit": sonic_unit,
             "density_unit": density_unit,
             "assumed_shallow_density": assumed_shallow_density,
+            "well_inclination": well_inclination,
+            "well_azimuth": well_azimuth,
+            "shmax_azimuth": shmax_azimuth,
         }
         if use_lot_calibration:
             compute_params["lot_depth"] = lot_depth_input
             compute_params["lot_pressure_mpa"] = lot_pressure_input
-            # tectonic_ey is intentionally omitted -- the backend solves it
         else:
             compute_params["tectonic_ey"] = tectonic_ey
 
-        with st.spinner("Computing 1D MEM on server..."):
+        with st.spinner("Computing Geomechanics Engine on server..."):
             compute_result = api_client.compute_mem(file_bytes, uploaded_file.name, compute_params)
 
         results_df = pd.DataFrame(compute_result["results"])
-        # JSON round-trip turns NaN into None -- restore proper numeric dtypes.
         results_df = results_df.apply(pd.to_numeric, errors="coerce")
         active_well_name = uploaded_file.name
         compute_params_used = compute_params
@@ -273,10 +301,7 @@ elif uploaded_file is not None:
                 st.warning(
                     f"⚠️ Your LOT/FIT pressure isn't physically achievable at {calib_info['matched_depth']:.1f} m "
                     f"given this well's pore pressure and overburden -- the valid range there is "
-                    f"{calib_info['achievable_min_mpa']:.1f}–{calib_info['achievable_max_mpa']:.1f} MPa. "
-                    f"The result has been clamped to the nearest valid value, so Shmin will NOT exactly match "
-                    f"what you entered. Double-check the LOT/FIT depth and pressure, or the Eaton pore-pressure "
-                    f"parameters for this well."
+                    f"{calib_info['achievable_min_mpa']:.1f}–{calib_info['achievable_max_mpa']:.1f} MPa."
                 )
 
     except BackendError as e:
@@ -291,13 +316,17 @@ if results_df is not None:
         c1.metric("Depth Interval", f"{results_df['Depth'].min():.0f} - {results_df['Depth'].max():.0f} m")
         c2.metric("Mean Sv", f"{results_df['Overburden_Stress_Sv_MPa'].mean():.1f} MPa" if "Overburden_Stress_Sv_MPa" in results_df else "N/A")
         c3.metric("Mean Pore Press", f"{results_df['Pore_Pressure_Pp_MPa'].mean():.1f} MPa" if "Pore_Pressure_Pp_MPa" in results_df else "N/A")
-        c4.metric("Recommended Mud Min", f"{results_df['Collapse_EMW_SG'].mean():.2f} SG" if "Collapse_EMW_SG" in results_df else "N/A")
+        
+        # Display Deviated collapse MW if available, else standard collapse MW
+        disp_col_mw = "Deviated_Collapse_EMW_SG" if ("Deviated_Collapse_EMW_SG" in results_df and well_inclination > 0) else "Collapse_EMW_SG"
+        c4.metric(f"Min MW ({well_inclination:.0f}° Incl)", f"{results_df[disp_col_mw].mean():.2f} SG" if disp_col_mw in results_df else "N/A")
         c5.metric("Safe Frac Margin", f"{results_df['Shmin_EMW_SG'].mean():.2f} SG" if "Shmin_EMW_SG" in results_df else "N/A")
 
         # Tab Structure
-        tab1, tab2 = st.tabs([
+        tab1, tab2, tab3 = st.tabs([
             "📊 1D MEM & Mud Weight Window Logs",
-            "🎯 2D Wellbore Stress & Failure Simulator (Kirsch & Mohr-Coulomb)"
+            "🎯 2D Wellbore Stress & Failure Simulator (Kirsch & Mohr-Coulomb)",
+            "🧭 Deviated & Horizontal Wellbore Stability (3D Trajectory)"
         ])
 
         # ==========================================
@@ -348,7 +377,9 @@ if results_df is not None:
             if "Pore_Pressure_EMW_SG" in results_df:
                 fig.add_trace(go.Scatter(x=results_df["Pore_Pressure_EMW_SG"], y=depth, name="Pore Press EMW", line=dict(color="#00E676", width=1.5, dash="dot")), row=1, col=4)
             if "Collapse_EMW_SG" in results_df:
-                fig.add_trace(go.Scatter(x=results_df["Collapse_EMW_SG"], y=depth, name="Shear Collapse (Min MW)", line=dict(color="#FF1744", width=2)), row=1, col=4)
+                fig.add_trace(go.Scatter(x=results_df["Collapse_EMW_SG"], y=depth, name="Vertical Collapse (0°)", line=dict(color="#FF1744", width=2)), row=1, col=4)
+            if "Deviated_Collapse_EMW_SG" in results_df and well_inclination > 0:
+                fig.add_trace(go.Scatter(x=results_df["Deviated_Collapse_EMW_SG"], y=depth, name=f"Deviated Collapse ({well_inclination:.0f}°)", line=dict(color="#FF5252", width=2.5, dash="dash")), row=1, col=4)
             if "Shmin_EMW_SG" in results_df:
                 fig.add_trace(go.Scatter(x=results_df["Shmin_EMW_SG"], y=depth, name="Losses Limit (Shmin)", line=dict(color="#FF9100", width=1.8, dash="dash")), row=1, col=4)
             if "Fracture_EMW_SG" in results_df:
@@ -400,7 +431,6 @@ if results_df is not None:
             nearest_idx = (results_df["Depth"] - target_depth).abs().idxmin()
             row_data = results_df.loc[nearest_idx]
 
-            # Defensive Value Extractor
             def get_val(key_list, default_val):
                 for k in key_list:
                     if k in row_data.index:
@@ -409,7 +439,7 @@ if results_df is not None:
                             return float(val)
                 return float(default_val)
 
-            rec_collapse = get_val(["Collapse_EMW_SG"], 1.15)
+            rec_collapse = get_val(["Deviated_Collapse_EMW_SG", "Collapse_EMW_SG"], 1.15)
             rec_frac = get_val(["Fracture_EMW_SG", "Shmin_EMW_SG"], 1.85)
 
             with col_mud:
@@ -433,7 +463,7 @@ if results_df is not None:
             ucs = get_val(["UCS_MPa"], 45.0)
             friction_ang = get_val(["Friction_Angle_deg", "Phi_deg", "Internal_Friction_deg"], 30.0)
 
-            # Mud pressure calculation: Pw (MPa) = rho (kg/m3) * g * depth / 1e6
+            # Mud pressure calculation: Pw (MPa)
             pw = (sim_mud_sg * 1000.0) * 9.80665 * target_depth / 1e6
 
             # Diagnostic Status
@@ -481,13 +511,12 @@ if results_df is not None:
             sig1_eff = c_stress + rad_diff
             sig3_eff = c_stress - rad_diff
 
-            # Mohr-Coulomb Failure Index (MCI >= 1.0 means failure)
+            # Mohr-Coulomb Failure Index
             phi_rad = np.radians(friction_ang)
             q_mc = np.tan(np.pi / 4.0 + phi_rad / 2.0) ** 2
             mc_strength = q_mc * np.maximum(sig3_eff, 0.0) + ucs
             mci = sig1_eff / np.maximum(mc_strength, 1e-4)
 
-            # Mask interior of wellbore
             sig_th_eff[mask_hole] = np.nan
             mci[mask_hole] = np.nan
 
@@ -502,7 +531,6 @@ if results_df is not None:
                 horizontal_spacing=0.12,
             )
 
-            # Contour 1: Hoop Stress
             fig_sim.add_trace(
                 go.Contour(
                     z=sig_th_eff,
@@ -516,7 +544,6 @@ if results_df is not None:
                 col=1,
             )
 
-            # Borehole boundary 1
             circle_theta = np.linspace(0, 2 * np.pi, 100)
             fig_sim.add_trace(
                 go.Scatter(
@@ -531,7 +558,6 @@ if results_df is not None:
                 col=1,
             )
 
-            # Contour 2: Mohr-Coulomb Index
             fig_sim.add_trace(
                 go.Contour(
                     z=mci,
@@ -545,7 +571,6 @@ if results_df is not None:
                 col=2,
             )
 
-            # Borehole boundary 2
             fig_sim.add_trace(
                 go.Scatter(
                     x=Rw * np.cos(circle_theta),
@@ -571,77 +596,30 @@ if results_df is not None:
             st.plotly_chart(fig_sim, use_container_width=True)
 
         # ==========================================
-        # Export Section
+        # TAB 3: Deviated & Horizontal Wellbore Stability
         # ==========================================
-        st.markdown("### 📑 Data Export & Engineering Reports")
-        col_csv, col_pdf = st.columns(2)
-
-        base_name = active_well_name.rsplit(".", 1)[0] if active_well_name else "Well"
-
-        with col_csv:
-            csv_data = results_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="📥 Download Full Geomechanical Dataset (CSV)",
-                data=csv_data,
-                file_name="GeoMech_Full_1D_MEM_MWW_Results.csv",
-                mime="text/csv",
-                use_container_width=True,
+        with tab3:
+            st.markdown("### 🧭 3D Wellbore Stability & Trajectory Optimization")
+            st.write(
+                "Analyze how borehole stability changes with **well inclination** and **azimuth** "
+                "relative to the regional in-situ stress field. Find the sweet-spot trajectory to prevent breakout."
             )
 
-        with col_pdf:
-            if st.button("📄 Generate PDF Report", use_container_width=True):
-                with st.spinner("Generating PDF report on server..."):
-                    pdf_bytes = api_client.generate_report_pdf(
-                        results_df.to_dict(orient="records"), base_name
-                    )
-                st.download_button(
-                    label="📥 Download PDF Report",
-                    data=pdf_bytes,
-                    file_name=f"GeoMech_Full_Report_{base_name}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                )
+            target_depth_dev = st.slider(
+                "Evaluation Depth for Trajectory Analysis (m)",
+                float(results_df["Depth"].min()),
+                float(results_df["Depth"].max()),
+                float(results_df["Depth"].mean()),
+                step=1.0,
+                key="dev_depth_slider"
+            )
 
-        with st.expander("📋 View Complete 1D MEM & Stability Data Table"):
-            st.dataframe(results_df, use_container_width=True)
+            dev_row_idx = (results_df["Depth"] - target_depth_dev).abs().idxmin()
+            d_row = results_df.loc[dev_row_idx]
 
-        # ==========================================
-        # Save to Account (only for a freshly computed well, not one
-        # already loaded from the account)
-        # ==========================================
-        if data_source == "upload":
-            st.markdown("### 💾 Save to Your Account")
-            if st.session_state["auth_token"]:
-                save_name = st.text_input("Save this well as", value=base_name, key="save_well_name_input")
-                if st.button("Save to My Wells", use_container_width=True):
-                    try:
-                        api_client.save_well(
-                            st.session_state["auth_token"],
-                            save_name,
-                            compute_params_used,
-                            results_df.to_dict(orient="records"),
-                        )
-                        st.success(f"✅ Saved '{save_name}' to your account. Find it in the sidebar under 'My Saved Wells'.")
-                    except BackendError as e:
-                        st.error(f"❌ Could not save: {e}")
-            else:
-                st.info("🔐 Log in from the sidebar to save this well's results to your account for later.")
-
-    except BackendError as e:
-        st.error(f"❌ Backend Connection/Computation Error: {e}")
-        st.info(f"The backend at `{api_client.BACKEND_URL}` is unreachable or returned an error. Make sure the FastAPI service is running.")
-    except Exception as e:
-        st.error(f"❌ Execution Error: {str(e)}")
-
-else:
-    st.info("👆 Upload a `.las` well log file from the sidebar, or open a saved well from your account, to generate the 1D MEM & Mud Weight Window.")
-
-st.markdown("---")
-st.markdown(
-    f"""
-    <div style="text-align: center; color: #888; font-size: 0.9rem;">
-        {PLATFORM_NAME} • Developed by <strong>{DEVELOPER_NAME}</strong> | Petroleum Geomechanics Specialist
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+            d_sv = float(d_row.get("Overburden_Stress_Sv_MPa", 50.0))
+            d_shmin = float(d_row.get("Shmin_MPa", 32.0))
+            d_shmax = float(d_row.get("SHmax_MPa", 42.0))
+            d_pp = float(d_row.get("Pore_Pressure_Pp_MPa", 22.0))
+            d_ucs = float(d_row.get("UCS_MPa", 45.0))
+            d_fric = float(d_row.get("Friction_Angle_deg", 3
