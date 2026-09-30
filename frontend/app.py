@@ -602,17 +602,20 @@ if results_df is not None:
             st.markdown("### 🧭 3D Wellbore Stability & Trajectory Optimization")
             st.write(
                 "Analyze how borehole stability changes with **well inclination** and **azimuth** "
-                "relative to the regional in-situ stress field. Find the sweet-spot trajectory to prevent breakout."
+                "relative to the regional in-situ stress field ($S_{Hmax}$, $S_{hmin}$, $S_v$)."
             )
 
-            target_depth_dev = st.slider(
-                "Evaluation Depth for Trajectory Analysis (m)",
-                float(results_df["Depth"].min()),
-                float(results_df["Depth"].max()),
-                float(results_df["Depth"].mean()),
-                step=1.0,
-                key="dev_depth_slider"
-            )
+            col_dev_ctl1, col_dev_ctl2 = st.columns([2, 1])
+
+            with col_dev_ctl1:
+                target_depth_dev = st.slider(
+                    "Evaluation Depth for Trajectory Analysis (m)",
+                    float(results_df["Depth"].min()),
+                    float(results_df["Depth"].max()),
+                    float(results_df["Depth"].mean()),
+                    step=1.0,
+                    key="dev_depth_slider",
+                )
 
             dev_row_idx = (results_df["Depth"] - target_depth_dev).abs().idxmin()
             d_row = results_df.loc[dev_row_idx]
@@ -622,4 +625,118 @@ if results_df is not None:
             d_shmax = float(d_row.get("SHmax_MPa", 42.0))
             d_pp = float(d_row.get("Pore_Pressure_Pp_MPa", 22.0))
             d_ucs = float(d_row.get("UCS_MPa", 45.0))
-            d_fric = float(d_row.get("Friction_Angle_deg", 3
+            d_fric = float(d_row.get("Friction_Angle_deg", 30.0))
+
+            with col_dev_ctl2:
+                friction_angle_input = st.number_input(
+                    "Internal Friction Angle (°)",
+                    min_value=15.0,
+                    max_value=50.0,
+                    value=float(d_fric if not np.isnan(d_fric) else 30.0),
+                    step=1.0,
+                )
+
+            # Prepare Payload for Backend
+            dev_payload = {
+                "results": results_df.to_dict(orient="records"),
+                "depth_m": float(target_depth_dev),
+                "well_inclination_deg": float(well_inclination),
+                "well_azimuth_deg": float(well_azimuth),
+                "shmax_azimuth_deg": float(shmax_azimuth),
+                "friction_angle_deg": float(friction_angle_input),
+            }
+
+            dev_result = None
+            with st.spinner("Simulating 3D Wellbore Stresses on Server..."):
+                try:
+                    import requests
+                    backend_endpoint = f"{api_client.BACKEND_URL}/api/v1/mem/deviated_stability"
+                    resp = requests.post(backend_endpoint, json=dev_payload, timeout=20)
+                    if resp.status_code == 200:
+                        dev_result = resp.json()
+                    else:
+                        st.error(f"Backend calculation error ({resp.status_code}): {resp.text}")
+                except Exception as exc:
+                    st.error(f"Failed to communicate with calculation service: {exc}")
+
+            if dev_result is not None:
+                collapse_emw = float(dev_result["collapse_emw_sg"])
+                thetas_deg = np.degrees(np.array(dev_result["theta_rad"]))
+                sigma_tt = np.array(dev_result["sigma_tt_eff"])
+
+                # Comparison with vertical well collapse
+                vert_collapse = float(d_row.get("Collapse_EMW_SG", collapse_emw))
+                delta_emw = collapse_emw - vert_collapse
+
+                # Metrics summary
+                dm1, dm2, dm3, dm4 = st.columns(4)
+                dm1.metric("Selected Inclination", f"{well_inclination:.0f}°")
+                dm2.metric("Selected Azimuth", f"{well_azimuth:.0f}°")
+                dm3.metric("Collapse EMW", f"{collapse_emw:.2f} SG", delta=f"{delta_emw:+.2f} vs Vertical")
+                dm4.metric("Max Wall Hoop Stress", f"{np.max(sigma_tt):.1f} MPa")
+
+                # Plots: Wall Hoop Stress distribution around well circumference
+                fig_dev = make_subplots(
+                    rows=1,
+                    cols=2,
+                    specs=[[{"type": "xy"}, {"type": "polar"}]],
+                    subplot_titles=(
+                        "Hoop Stress Distribution vs Wellbore Angle θ",
+                        "Polar Stress Profile around Wellbore Wall",
+                    ),
+                    horizontal_spacing=0.15,
+                )
+
+                # Cartesian Track
+                fig_dev.add_trace(
+                    go.Scatter(
+                        x=thetas_deg,
+                        y=sigma_tt,
+                        mode="lines",
+                        line=dict(color="#FF3D00", width=2.5),
+                        name="σ'θθ (Hoop Stress)",
+                    ),
+                    row=1,
+                    col=1,
+                )
+                fig_dev.add_hline(
+                    y=d_ucs,
+                    line_dash="dot",
+                    line_color="#D50000",
+                    annotation_text="UCS Limit",
+                    row=1,
+                    col=1,
+                )
+
+                # Polar Track
+                fig_dev.add_trace(
+                    go.Scatterpolar(
+                        r=np.maximum(sigma_tt, 0.0),
+                        theta=thetas_deg,
+                        mode="lines",
+                        fill="toself",
+                        fillcolor="rgba(255, 61, 0, 0.15)",
+                        line=dict(color="#FF3D00", width=2),
+                        name="Polar σ'θθ",
+                    ),
+                    row=1,
+                    col=2,
+                )
+
+                fig_dev.update_layout(
+                    height=500,
+                    margin=dict(l=40, r=40, t=60, b=40),
+                    showlegend=False,
+                )
+                fig_dev.update_xaxes(title_text="Wellbore Wall Angle θ (°)", row=1, col=1)
+                fig_dev.update_yaxes(title_text="Effective Hoop Stress σ'θθ (MPa)", row=1, col=1)
+
+                st.plotly_chart(fig_dev, use_container_width=True)
+
+                st.success(
+                    f"✅ **Trajectory Evaluation at {target_depth_dev:.1f} m:** "
+                    f"Minimum required mud weight to prevent borehole breakout is **{collapse_emw:.2f} SG**."
+                )
+
+    except Exception as e:
+        st.error(f"Visualization rendering error: {str(e)}")
