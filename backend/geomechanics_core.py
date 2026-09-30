@@ -1,4 +1,5 @@
 import io
+import math
 import numpy as np
 import pandas as pd
 import lasio
@@ -366,3 +367,164 @@ class GeomechanicsCore:
             "achievable_max_mpa": achievable_max_mpa,
             "within_range": within_range,
         }
+    # =========================================================
+    # Deviated/Horizontal Wells Stability Patch
+    # =========================================================
+
+    @staticmethod
+    def _deg2rad(x: float) -> float:
+        return float(x) * math.pi / 180.0
+
+    @staticmethod
+    def _unit(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+        n = float(np.linalg.norm(v))
+        if n < eps:
+            return np.array([1.0, 0.0, 0.0], dtype=float)
+        return (v / n).astype(float)
+
+    @staticmethod
+    def _build_in_situ_stress_tensor(
+        sv_mpa: float,
+        shmin_mpa: float,
+        shmax_mpa: float,
+        shmax_azimuth_deg: float,
+    ) -> np.ndarray:
+        Sh = float(shmin_mpa)
+        SH = float(shmax_mpa)
+        Sv = float(sv_mpa)
+        az = GeomechanicsCore._deg2rad(shmax_azimuth_deg)
+        e_SH = np.array([math.sin(az), math.cos(az), 0.0], dtype=float)
+        e_Sh = np.array([math.sin(az + math.pi / 2.0), math.cos(az + math.pi / 2.0), 0.0], dtype=float)
+        e_z = np.array([0.0, 0.0, 1.0], dtype=float)
+        sigma = (
+            SH * np.outer(e_SH, e_SH)
+            + Sh * np.outer(e_Sh, e_Sh)
+            + Sv * np.outer(e_z, e_z)
+        )
+        return sigma
+
+    @staticmethod
+    def _wellbore_rotation_matrix(
+        well_inclination_deg: float,
+        well_azimuth_deg: float,
+    ) -> np.ndarray:
+        inc = GeomechanicsCore._deg2rad(well_inclination_deg)
+        az = GeomechanicsCore._deg2rad(well_azimuth_deg)
+        z_w = np.array(
+            [math.sin(az) * math.sin(inc), math.cos(az) * math.sin(inc), math.cos(inc)],
+            dtype=float
+        )
+        z_w = GeomechanicsCore._unit(z_w)
+        ref = np.array([0.0, 1.0, 0.0], dtype=float)
+        if abs(float(np.dot(ref, z_w))) > 0.95:
+            ref = np.array([1.0, 0.0, 0.0], dtype=float)
+        x_w = np.cross(ref, z_w)
+        x_w = GeomechanicsCore._unit(x_w)
+        y_w = np.cross(z_w, x_w)
+        y_w = GeomechanicsCore._unit(y_w)
+        return np.vstack([x_w, y_w, z_w])
+
+    @staticmethod
+    def _rotate_tensor(R: np.ndarray, sigma_enu: np.ndarray) -> np.ndarray:
+        return R @ sigma_enu @ R.T
+
+    @staticmethod
+    def _kirsch_wall_stresses(
+        sigma_well: np.ndarray,
+        pp_mpa: float,
+        pw_mpa: float,
+        nu: float,
+        theta_rad: np.ndarray,
+    ) -> dict:
+        sxx, syy, szz = float(sigma_well[0, 0]), float(sigma_well[1, 1]), float(sigma_well[2, 2])
+        txy, txz, tyz = float(sigma_well[0, 1]), float(sigma_well[0, 2]), float(sigma_well[1, 2])
+        pp, pw = float(pp_mpa), float(pw_mpa)
+        nu = float(np.clip(nu, 0.05, 0.49))
+        c2, s2 = np.cos(2.0 * theta_rad), np.sin(2.0 * theta_rad)
+        c1, s1 = np.cos(theta_rad), np.sin(theta_rad)
+
+        s_rr_eff = (pw - pp) * np.ones_like(theta_rad)
+        s_tt_total = (sxx + syy) - 2.0 * (sxx - syy) * c2 - 4.0 * txy * s2 - pw
+        s_tt_eff = s_tt_total - pp
+        s_zz_total = szz - 2.0 * nu * (sxx - syy) * c2 - 4.0 * nu * txy * s2
+        tau_tz_total = 2.0 * (tyz * c1 - txz * s1)
+        s_zz_eff = s_zz_total - pp
+
+        return {
+            "sigma_rr_eff": s_rr_eff,
+            "sigma_tt_eff": s_tt_eff,
+            "sigma_zz_eff": s_zz_eff,
+            "tau_tz_total": tau_tz_total,
+        }
+
+    @staticmethod
+    def _mohr_coulomb_collapse_check(
+        sigma1_eff: np.ndarray,
+        sigma3_eff: np.ndarray,
+        ucs_mpa: float,
+        friction_angle_deg: float,
+    ) -> np.ndarray:
+        phi = GeomechanicsCore._deg2rad(friction_angle_deg)
+        q = (1.0 + np.sin(phi)) / (1.0 - np.sin(phi) + 1e-12)
+        return sigma1_eff >= (q * sigma3_eff + float(ucs_mpa))
+
+    def compute_deviated_wellbore_stability(
+        self,
+        mem_df: pd.DataFrame,
+        depth_m: float,
+        well_inclination_deg: float,
+        well_azimuth_deg: float,
+        shmax_azimuth_deg: float,
+        friction_angle_deg: float = 30.0,
+        mud_weight_sg_min: float = 0.90,
+        mud_weight_sg_max: float = 2.50,
+        mud_weight_sg_step: float = 0.01,
+        n_theta: int = 181,
+    ) -> dict:
+        if mem_df is None or mem_df.empty:
+            raise ValueError("mem_df is empty.")
+
+        idx = (mem_df["Depth"] - float(depth_m)).abs().idxmin()
+        row = mem_df.loc[idx]
+
+        sigma_enu = self._build_in_situ_stress_tensor(
+            float(row["Overburden_Stress_Sv_MPa"]),
+            float(row["Shmin_MPa"]),
+            float(row["SHmax_MPa"]),
+            shmax_azimuth_deg,
+        )
+        R = self._wellbore_rotation_matrix(well_inclination_deg, well_azimuth_deg)
+        sigma_well = self._rotate_tensor(R, sigma_enu)
+
+        theta = np.linspace(0.0, 2.0 * np.pi, int(n_theta), dtype=float)
+        mws = np.arange(mud_weight_sg_min, mud_weight_sg_max + 0.5 * mud_weight_sg_step, mud_weight_sg_step)
+        depth_use = max(float(row["Depth"]), 1.0)
+        mpam_per_m = 9.80665e-3
+
+        collapse_mw = float(mud_weight_sg_max)
+        nu = float(row.get("Poisson_Ratio", 0.25))
+        pp = float(row["Pore_Pressure_Pp_MPa"])
+        ucs = float(row.get("UCS_MPa", 20.0))
+
+        for mw in mws:
+            Pw = float(mw) * mpam_per_m * depth_use
+            kir = self._kirsch_wall_stresses(sigma_well, pp, Pw, nu, theta)
+            mean = 0.5 * (kir["sigma_tt_eff"] + kir["sigma_zz_eff"])
+            rad = np.sqrt((0.5 * (kir["sigma_tt_eff"] - kir["sigma_zz_eff"])) ** 2 + (kir["tau_tz_total"]) ** 2)
+            s1 = mean + rad
+            s3 = mean - rad
+            if not np.any(self._mohr_coulomb_collapse_check(s1, s3, ucs, friction_angle_deg)):
+                collapse_mw = float(mw)
+                break
+
+        # Calculate final state with the determined collapse mud weight
+        final_pw = collapse_mw * mpam_per_m * depth_use
+        final_kir = self._kirsch_wall_stresses(sigma_well, pp, final_pw, nu, theta)
+
+        return {
+            "collapse_emw_sg": collapse_mw,
+            "theta_rad": theta,
+            "sigma_tt_eff": final_kir["sigma_tt_eff"],
+        }
+
+   ta, "sigma_tt_eff": kir["sigma_tt_eff"]}
