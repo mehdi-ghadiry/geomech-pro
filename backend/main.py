@@ -193,6 +193,53 @@ async def compute_mem(
         "results": results_df.to_dict(orient="records"),
         "calibration": calibration_info,
     }
+# ==========================================================
+# Deviated / Horizontal Wellbore Stability
+# ==========================================================
+class DeviatedStabilityRequest(BaseModel):
+    results: List[Dict[str, Any]]
+    depth_m: float
+    well_inclination_deg: float
+    well_azimuth_deg: float
+    shmax_azimuth_deg: float
+    friction_angle_deg: float = 30.0
+    mud_weight_sg_min: float = 0.90
+    mud_weight_sg_max: float = 2.50
+    mud_weight_sg_step: float = 0.01
+    n_theta: int = 181
+
+
+@app.post("/api/v1/mem/deviated_stability")
+def deviated_stability(payload: DeviatedStabilityRequest) -> Dict[str, Any]:
+    if not payload.results:
+        raise HTTPException(status_code=422, detail="No results provided (payload.results is empty).")
+
+    mem_df = pd.DataFrame(payload.results)
+
+    try:
+        out = core.compute_deviated_wellbore_stability(
+            mem_df=mem_df,
+            depth_m=float(payload.depth_m),
+            well_inclination_deg=float(payload.well_inclination_deg),
+            well_azimuth_deg=float(payload.well_azimuth_deg),
+            shmax_azimuth_deg=float(payload.shmax_azimuth_deg),
+            friction_angle_deg=float(payload.friction_angle_deg),
+            mud_weight_sg_min=float(payload.mud_weight_sg_min),
+            mud_weight_sg_max=float(payload.mud_weight_sg_max),
+            mud_weight_sg_step=float(payload.mud_weight_sg_step),
+            n_theta=int(payload.n_theta),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Deviated stability computation failed: {exc}")
+
+    return {
+        "collapse_emw_sg": float(out["collapse_emw_sg"]),
+        "theta_rad": np.asarray(out["theta_rad"], dtype=float).tolist(),
+        "sigma_tt_eff": np.asarray(out["sigma_tt_eff"], dtype=float).tolist(),
+    }
+
 
 
 class ReportRequest(BaseModel):
