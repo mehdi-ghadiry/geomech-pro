@@ -188,7 +188,19 @@ with st.sidebar:
 
     with st.expander("🛠️ Advanced Geomechanics Parameters", expanded=False):
         biot_alpha = st.slider("Biot's Coefficient (α)", 0.5, 1.0, 1.0, 0.05)
-        dt_normal = st.number_input("Normal Compaction DT (μs/ft)", value=100.0, step=5.0)
+        dt_surface = st.number_input("Surface sonic for normal trend (μs/ft)", value=180.0, min_value=1.0, step=5.0)
+        dt_normal = st.number_input("Compacted-end sonic for normal trend (μs/ft)", value=100.0, min_value=1.0, step=5.0)
+        compaction_coefficient = st.number_input(
+            "Normal-trend compaction coefficient (1/m)", value=0.0003, min_value=0.0,
+            step=0.0001, format="%.6f",
+            help="Calibrate these trend settings with normally compacted shale from this field. Generic defaults are not field validation.",
+        )
+        normal_trend_calibrated = st.checkbox(
+            "I calibrated this normal sonic trend for the formation",
+            value=False,
+            help="Enable only after calibrating the trend against normally compacted local shale and/or field pressure references.",
+        )
+        st.caption("Negative estimates and estimates above the overburden screening limit are excluded from stresses and mud-weight calculations. Generic defaults are not field calibration.")
         eaton_exp = st.slider("Eaton's Exponent", 1.0, 5.0, 3.0, 0.1)
         assumed_shallow_density = st.number_input(
             "Assumed Shallow Density Above Log Top (g/cm3)",
@@ -278,6 +290,13 @@ elif uploaded_file is not None:
                 st.info("Select whether the chosen depth curve is TVD or MD before computing.")
             st.stop()
 
+        if not normal_trend_calibrated:
+            st.warning(
+                "Pressure, stress, and mud-weight calculations are paused. First calibrate the normal sonic trend "
+                "for this formation; the generic starting values are not safe to treat as field data."
+            )
+            st.stop()
+
         # --- Step 2: send the file + column mapping + parameters to the
         #     backend and get the computed 1D MEM back as JSON ---
         compute_params = {
@@ -289,6 +308,9 @@ elif uploaded_file is not None:
             "dts_col": dts_actual or "",
             "biot_alpha": biot_alpha,
             "dt_matrix": dt_normal,
+            "dt_surface": dt_surface,
+            "compaction_coefficient": compaction_coefficient,
+            "normal_trend_calibrated": normal_trend_calibrated,
             "eaton_n": eaton_exp,
             "tectonic_ex": tectonic_ex,
             "sonic_unit": sonic_unit,
@@ -313,11 +335,11 @@ elif uploaded_file is not None:
         upper_hits = int(results_df.get("Pore_Pressure_Upper_Bound_Hit", pd.Series(0, index=results_df.index)).fillna(0).sum())
         invalid_pp = int((1 - results_df.get("Pore_Pressure_Estimate_Valid", pd.Series(0, index=results_df.index)).fillna(0)).sum())
         if lower_hits or upper_hits or invalid_pp:
+            negative_pp = int(results_df.get("Pore_Pressure_Negative_Flag", pd.Series(0, index=results_df.index)).fillna(0).sum())
             st.warning(
-                f"Unclipped Eaton pressure estimate is outside the reference bounds at {lower_hits} "
-                f"shallow-bound, {upper_hits} upper-bound, and {invalid_pp} invalid samples. "
-                "Pressure-derived stresses and mud-weight results at flagged depths are screening outputs only; "
-                "calibrate against field measurements before operational use."
+                f"Eaton pressure failed quality checks at {invalid_pp} samples, including {negative_pp} negative estimates. "
+                "Invalid pressure values are excluded from the stress and mud-weight calculations; gaps in those outputs are intentional. "
+                "Recalibrate the normal sonic trend against normally compacted local shale and field measurements before operational use."
             )
         active_well_name = uploaded_file.name
         compute_params_used = compute_params

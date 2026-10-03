@@ -151,6 +151,9 @@ class GeomechanicsCore:
         depth_unit="m",
         biot_alpha=1.0,
         dt_matrix=55.5,
+        dt_surface=180.0,
+        compaction_coefficient=0.0003,
+        normal_trend_calibrated=False,
         dt_fluid=189.0,
         eaton_n=3.0,
         tectonic_ex=0.0,      # Corrected default to zero-strain baseline
@@ -165,11 +168,30 @@ class GeomechanicsCore:
     ):
         """
         Full 1D MEM computation. Depth must be explicitly identified as TVD.
-        Eaton pressure estimates are reported without silently clipping them.
+        Eaton pressure requires an explicitly confirmed, field-calibrated normal
+        sonic trend. Raw estimates remain available for QC; negative or excessive
+        estimates are excluded from dependent stresses and mud-weight calculations.
         """
         biot_alpha = float(biot_alpha)
         if not np.isfinite(biot_alpha) or not 0.0 <= biot_alpha <= 1.0:
             raise ValueError("Biot coefficient must be between 0 and 1.")
+        dt_matrix = float(dt_matrix)
+        dt_surface = float(dt_surface)
+        compaction_coefficient = float(compaction_coefficient)
+        eaton_n = float(eaton_n)
+        if not np.isfinite([dt_matrix, dt_surface, compaction_coefficient, eaton_n]).all():
+            raise ValueError("Normal-compaction trend settings must be finite numbers.")
+        if dt_matrix <= 0.0 or dt_surface <= 0.0 or compaction_coefficient < 0.0 or eaton_n <= 0.0:
+            raise ValueError(
+                "Normal-compaction transit times and Eaton exponent must be positive; "
+                "compaction coefficient cannot be negative."
+            )
+        if not normal_trend_calibrated:
+            raise ValueError(
+                "Pore-pressure estimation is disabled until the normal sonic compaction trend "
+                "is calibrated for this formation using normally compacted local shale or "
+                "field reference pressures. Supply calibrated trend settings and confirm them."
+            )
 
         depth_reference = str(depth_reference or "").strip().upper()
         if depth_reference != "TVD":
@@ -277,30 +299,47 @@ class GeomechanicsCore:
         p_hydro = normal_pressure_grad * np.maximum(depth_m, 0.0)
 
         # --- Pore Pressure (Eaton's Sonic Method) ---
-        # dt_normal represents standard compaction trend line
-        c_compaction = 0.0003  # 1/m empirical compaction factor
-        dt_surface = 180.0     # us/ft typical surface compaction value
-        dt_normal = dt_matrix + (dt_surface - dt_matrix) * np.exp(-c_compaction * depth_m)
+        # These are user-supplied local trend parameters, not universal constants.
+        # dt_matrix is the asymptotic compacted transit time; dt_surface and
+        # compaction_coefficient control the depth trend and must be field-calibrated.
+        dt_normal = dt_matrix + (dt_surface - dt_matrix) * np.exp(-compaction_coefficient * depth_m)
 
         # Eaton acoustic ratio (observed vs normal trend)
         ratio = np.maximum(dt_normal / np.maximum(dt, 1e-2), 0.1)
         pp_eaton = sv - (sv - p_hydro) * (ratio ** eaton_n)
 
-        # Do not silently clamp an Eaton estimate to assumed physical bounds.
-        # Report the raw estimate and expose where it falls outside the conventional
-        # hydrostatic-to-0.95*Sv screening interval so the user can calibrate it.
-        pp = pp_eaton.copy()
-        pp_valid = np.isfinite(pp_eaton) & np.isfinite(p_hydro) & np.isfinite(sv)
-        lower_bound_hit = pp_valid & (pp_eaton < p_hydro)
-        upper_bound_hit = pp_valid & (pp_eaton > (sv * 0.95))
+        # Preserve the unbounded Eaton result for diagnosis, but never pass
+        # physically impossible values into effective-stress or mud-window work.
+        # Sub-hydrostatic (but non-negative) pressures remain possible; they are
+        # flagged for review rather than automatically discarded.
+        finite_estimate = np.isfinite(pp_eaton) & np.isfinite(p_hydro) & np.isfinite(sv)
+        lower_bound_hit = finite_estimate & (pp_eaton < p_hydro)
+        upper_bound_hit = finite_estimate & (pp_eaton > (sv * 0.95))
+        negative_pressure_hit = finite_estimate & (pp_eaton < 0.0)
+        estimate_valid = finite_estimate & ~negative_pressure_hit & ~upper_bound_hit
+        invalid_count = int((~estimate_valid).sum())
+        negative_count = int(negative_pressure_hit.sum())
+        if not estimate_valid.any():
+            raise ValueError(
+                "No physically admissible pore-pressure estimates remain: "
+                f"{negative_count} samples are negative and {int(upper_bound_hit.sum())} "
+                "exceed 0.95 times overburden. The local sonic normal-compaction trend "
+                "does not match this well; calibrate the surface transit time, compacted "
+                "transit time, and compaction coefficient against normally compacted "
+                "formation data before calculating stresses or mud weight."
+            )
+
+        pp = np.where(estimate_valid, pp_eaton, np.nan)
         out["Pore_Pressure_Pp_MPa"] = pp
         out["Pore_Pressure_Pp_Eaton_Raw_MPa"] = pp_eaton
         out["Pore_Pressure_Hydrostatic_Reference_MPa"] = p_hydro
         out["Pore_Pressure_0p95Sv_Reference_MPa"] = sv * 0.95
         out["Pore_Pressure_Lower_Bound_Hit"] = lower_bound_hit.astype(int)
         out["Pore_Pressure_Upper_Bound_Hit"] = upper_bound_hit.astype(int)
-        out["Pore_Pressure_Estimate_Valid"] = pp_valid.astype(int)
-        out["Pore_Pressure_QC_Flag"] = (~pp_valid | lower_bound_hit | upper_bound_hit).astype(int)
+        out["Pore_Pressure_Negative_Flag"] = negative_pressure_hit.astype(int)
+        out["Pore_Pressure_Estimate_Valid"] = estimate_valid.astype(int)
+        out["Pore_Pressure_QC_Flag"] = (~estimate_valid | lower_bound_hit | upper_bound_hit).astype(int)
+        out["Pore_Pressure_Invalid_Count"] = invalid_count
 
         # --- Effective Stresses & Poroelastic Horizontal Stresses ---
         e_pa = out["Youngs_Modulus_GPa"].values * 1e9

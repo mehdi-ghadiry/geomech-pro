@@ -100,6 +100,11 @@ def generate_pdf_report(
     mean_sv = results_df["Overburden_Stress_Sv_MPa"].mean()
     mean_collapse_emw = results_df["Collapse_EMW_SG"].mean()
     mean_frac_emw = results_df["Fracture_EMW_SG"].mean()
+    if "Pore_Pressure_Estimate_Valid" in results_df.columns:
+        valid_pressure_count = int(pd.to_numeric(results_df["Pore_Pressure_Estimate_Valid"], errors="coerce").fillna(0).sum())
+    else:
+        valid_pressure_count = len(results_df)
+    invalid_pressure_count = max(0, len(results_df) - valid_pressure_count)
 
     summary_text = (
         f"This automated technical report presents the 1D Mechanical Earth Model (MEM) and Wellbore Stability analysis "
@@ -107,6 +112,8 @@ def generate_pdf_report(
         f"of {mean_ucs:.1f} MPa. Pore pressure reaches a maximum of {max_pp:.1f} MPa. "
         f"In-situ stress diagnostics indicate an average Overburden Stress (Sv) of {mean_sv:.1f} MPa, "
         f"Minimum Horizontal Stress (Shmin) of {mean_shmin:.1f} MPa, and Maximum Horizontal Stress (SHmax) of {mean_shmax:.1f} MPa."
+        + (f" WARNING: pressure-derived values were excluded at {invalid_pressure_count} of {len(results_df)} samples because the Eaton estimate failed physical screening. Do not use the mud-weight window as a full-interval operational recommendation; calibrate the local normal sonic trend."
+           if invalid_pressure_count else "")
     )
     pdf.multi_cell(0, 5, summary_text)
     pdf.ln(6)
@@ -158,14 +165,24 @@ def generate_pdf_report(
     pdf.set_font("helvetica", "", 10)
     pdf.set_text_color(50, 50, 50)
 
+    if invalid_pressure_count:
+        operational_recommendation = (
+            f"Pressure-derived results are missing at {invalid_pressure_count} of {len(results_df)} samples. "
+            "No full-interval operational mud-weight recommendation is provided; calibrate the sonic trend and validate against field data."
+        )
+    else:
+        operational_recommendation = (
+            f"Maintain active drilling mud weight securely within the screening window "
+            f"[{mean_collapse_emw:.2f} SG - {mean_frac_emw:.2f} SG]. This is not a substitute for field calibration."
+        )
+
     mww_text = (
         f"Based on the Mohr-Coulomb failure criterion and elastic stress distribution around a vertical wellbore:\n"
         f"- **Shear Failure (Collapse) Gradient:** Averages {mean_collapse_emw:.2f} SG, representing the minimum required "
         f"mud density to prevent breakouts and wellbore sloughing.\n"
         f"- **Tensile Failure (Fracture) Gradient:** Averages {mean_frac_emw:.2f} SG, defining the upper operational limit "
         f"to prevent lost circulation and mud losses.\n"
-        f"- **Operational Recommendation:** Maintain active drilling mud weight securely within the safe window "
-        f"[{mean_collapse_emw:.2f} SG - {mean_frac_emw:.2f} SG] to ensure borehole integrity."
+        f"- **Operational Recommendation:** {operational_recommendation}"
     )
     pdf.multi_cell(0, 5, mww_text)
     pdf.ln(8)
