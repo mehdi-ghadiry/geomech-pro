@@ -139,6 +139,35 @@ class GeomechanicsCore:
         df = pd.DataFrame(rows, columns=curve_names)
         return self._clean_tabular_dataframe(df, "text export")
 
+    @staticmethod
+    def _vertical_collapse_pressure(
+        shmax_mpa,
+        shmin_mpa,
+        ucs_mpa,
+        pp_mpa,
+        friction_angle_deg,
+        biot_alpha,
+    ):
+        """Mohr-Coulomb collapse pressure for a vertical well under the model's effective-stress convention.
+
+        Assumes a vertical circular wellbore, isotropic linear-elastic Kirsch wall stresses,
+        compression-positive stresses, uniform pore pressure, and no thermal or chemical
+        effects. The alpha*Pp term follows from applying the same Biot effective stress
+        convention used by the wall-stress calculation.
+        """
+        alpha = float(biot_alpha)
+        if not np.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
+            raise ValueError("Biot coefficient must be between 0 and 1.")
+        phi = np.radians(float(friction_angle_deg))
+        q_mc = (1.0 + np.sin(phi)) / (1.0 - np.sin(phi))
+        pressure = (
+            3.0 * np.asarray(shmax_mpa)
+            - np.asarray(shmin_mpa)
+            - np.asarray(ucs_mpa)
+            + alpha * np.asarray(pp_mpa) * (q_mc - 1.0)
+        ) / (q_mc + 1.0)
+        return np.maximum(pressure, pp_mpa)
+
     # ---------- 1D MEM Engine ----------
     def compute_1d_mem(
         self,
@@ -378,17 +407,18 @@ class GeomechanicsCore:
         out["Pore_Pressure_EMW_SG"] = mw_sg(pp, depth_m)
 
         # Shear Failure Collapse Pressure (Mohr-Coulomb around wellbore)
-        phi = np.radians(float(friction_angle))
-        q_mc = (1.0 + np.sin(phi)) / (1.0 - np.sin(phi))
         shmin_v = out["Shmin_MPa"].values
         shmax_v = out["SHmax_MPa"].values
-        p_frac_upper = shmin_v  # Losses threshold at wellbore wall
+        p_frac_upper = shmin_v  # Existing simplified losses threshold; not a tensile-failure calculation.
 
-        pw_collapse = (
-            (3.0 * shmax_v - shmin_v - out["UCS_MPa"].values) / (q_mc + 1.0)
-        ) + (pp * (q_mc - 1.0) / (q_mc + 1.0))
-
-        pw_collapse = np.maximum(pw_collapse, pp)
+        pw_collapse = self._vertical_collapse_pressure(
+            shmax_v,
+            shmin_v,
+            out["UCS_MPa"].values,
+            pp,
+            friction_angle,
+            biot_alpha,
+        )
         out["Collapse_EMW_SG"] = np.clip(mw_sg(pw_collapse, depth_m), 0.8, 2.5)
         out["Shmin_EMW_SG"] = mw_sg(shmin_v, depth_m)
         out["Fracture_EMW_SG"] = np.clip(mw_sg(p_frac_upper, depth_m), out["Pore_Pressure_EMW_SG"] + 0.05, 3.0)
@@ -568,6 +598,23 @@ class GeomechanicsCore:
         idx = (mem_df["Depth"] - float(depth_m)).abs().idxmin()
         row = mem_df.loc[idx]
 
+        # A NaN pressure makes all failure comparisons false; without this guard,
+        # the search could incorrectly report its first tested mud weight as safe.
+        valid_flag = row.get("Pore_Pressure_Estimate_Valid", None)
+        if valid_flag is not None:
+            if pd.isna(valid_flag) or float(valid_flag) != 1.0:
+                raise ValueError(
+                    "Cannot calculate deviated-well stability: the selected depth has "
+                    "an invalid or unavailable pore-pressure estimate (QC failed)."
+                )
+        qc_flag = row.get("Pore_Pressure_QC_Flag", None)
+        if qc_flag is not None:
+            if pd.isna(qc_flag) or float(qc_flag) != 0.0:
+                raise ValueError(
+                    "Cannot calculate deviated-well stability: the selected depth has "
+                    "an invalid or unavailable pore-pressure estimate (QC failed)."
+                )
+
         stored_alpha = row.get("Biot_Coefficient", np.nan)
         if pd.notna(stored_alpha):
             alpha = float(stored_alpha)
@@ -580,6 +627,21 @@ class GeomechanicsCore:
             )
         if not np.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
             raise ValueError("Biot coefficient must be between 0 and 1.")
+
+        required = (
+            "Depth",
+            "Overburden_Stress_Sv_MPa",
+            "Shmin_MPa",
+            "SHmax_MPa",
+            "Pore_Pressure_Pp_MPa",
+            "Poisson_Ratio",
+            "UCS_MPa",
+        )
+        if any(column not in row.index or pd.isna(row[column]) or not np.isfinite(float(row[column])) for column in required):
+            raise ValueError(
+                "Cannot calculate deviated-well stability: required pressure or stress "
+                "inputs are missing or non-finite at the selected depth."
+            )
 
         sigma_enu = self._build_in_situ_stress_tensor(
             float(row["Overburden_Stress_Sv_MPa"]),
