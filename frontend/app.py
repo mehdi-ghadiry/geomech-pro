@@ -214,8 +214,9 @@ with st.sidebar:
         use_lot_calibration = st.checkbox(
             "📏 Calibrate εy with a LOT/FIT measurement",
             help="If you have a real Leak-Off Test or Formation Integrity Test result, "
-                 "enter it below instead of guessing εy -- the model solves for the "
-                 "tectonic strain that reproduces it exactly at that depth.",
+                 "enter it below instead of guessing εy. The model matches the nearest "
+                 "log sample (within its depth tolerance) and applies calibration only "
+                 "when the pressure is within the modeled Shmin range.",
         )
         if use_lot_calibration:
             lot_depth_input = st.number_input("LOT/FIT Depth (m)", value=2000.0, step=10.0)
@@ -402,18 +403,22 @@ elif uploaded_file is not None:
 
         calib_info = compute_result.get("calibration")
         if calib_info:
+            requested_depth_display = float(depth_from_meters(calib_info["requested_depth"], depth_unit))
             matched_depth_display = float(depth_from_meters(calib_info["matched_depth"], depth_unit))
-            if calib_info["within_range"]:
+            depth_offset_display = float(depth_from_meters(calib_info["depth_offset_m"], depth_unit))
+            if calib_info.get("calibration_applied", calib_info["within_range"]):
                 st.success(
-                    f"📏 Calibrated using your LOT/FIT point at {matched_depth_display:.1f} {depth_unit} — "
-                    f"solved tectonic εy = {calib_info['tectonic_ey']:.6f} (was {calib_info['uncalibrated_shmin_mpa']:.1f} MPa "
-                    f"before calibration)."
+                    f"📏 LOT/FIT requested at {requested_depth_display:.1f} {depth_unit}; calibrated at the nearest log sample "
+                    f"({matched_depth_display:.1f} {depth_unit}, offset {depth_offset_display:.1f} {depth_unit}). "
+                    f"Solved tectonic εy = {calib_info['tectonic_ey']:.6f}; Shmin before calibration was "
+                    f"{calib_info['uncalibrated_shmin_mpa']:.1f} MPa."
                 )
             else:
                 st.warning(
-                    f"⚠️ Your LOT/FIT pressure isn't physically achievable at {matched_depth_display:.1f} {depth_unit} "
-                    f"given this well's pore pressure and overburden -- the valid range there is "
-                    f"{calib_info['achievable_min_mpa']:.1f}–{calib_info['achievable_max_mpa']:.1f} MPa."
+                    f"⚠️ LOT/FIT calibration was not applied. At the matched log sample ({matched_depth_display:.1f} {depth_unit}; "
+                    f"requested {requested_depth_display:.1f} {depth_unit}), the modeled Shmin range is "
+                    f"{calib_info['achievable_min_mpa']:.1f}–{calib_info['achievable_max_mpa']:.1f} MPa. "
+                    "The original tectonic strain was retained."
                 )
 
     except BackendError as e:

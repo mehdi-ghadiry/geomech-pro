@@ -594,47 +594,111 @@ class GeomechanicsCore:
         lot_depth: float,
         lot_pressure_mpa: float,
         biot_alpha: float = 1.0,
+        tectonic_ex: float = 0.0,
+        initial_tectonic_ey: float = 0.0,
     ) -> dict:
-        """Solves algebraically for tectonic_ey using generalized plane strain."""
-        if results_df.empty:
+        """Solve for tectonic_ey at the nearest sufficiently close log sample.
+
+        If that sample lacks required valid properties, calibration is rejected
+        rather than silently switching to a different depth. The calibration
+        uses the same strain terms and Shmin screening bounds
+        as compute_1d_mem. A result outside those bounds is reported but must
+        not be applied to the returned MEM.
+        """
+        if results_df is None or results_df.empty:
             raise ValueError("No computed results to calibrate against.")
 
-        idx = (results_df["Depth"] - lot_depth).abs().idxmin()
-        row = results_df.loc[idx]
+        lot_depth = float(lot_depth)
+        lot_pressure_mpa = float(lot_pressure_mpa)
+        biot_alpha = float(biot_alpha)
+        tectonic_ex = float(tectonic_ex)
+        initial_tectonic_ey = float(initial_tectonic_ey)
+        if not np.isfinite([lot_depth, lot_pressure_mpa, biot_alpha, tectonic_ex, initial_tectonic_ey]).all():
+            raise ValueError("LOT/FIT depth, pressure, Biot coefficient, and tectonic strains must be finite.")
+        if lot_depth < 0.0 or lot_pressure_mpa <= 0.0:
+            raise ValueError("LOT/FIT depth must be non-negative and pressure must be positive.")
+        if not 0.0 <= biot_alpha <= 1.0:
+            raise ValueError("Biot coefficient must be between 0 and 1.")
 
-        nu_eff = row.get("Nu_Eff")
-        e_gpa = row.get("Youngs_Modulus_GPa")
-        sig_v_eff_mpa = row.get("Sig_V_Eff_MPa")
-        pp_mpa = row.get("Pore_Pressure_Pp_MPa")
-
-        if any(pd.isna(v) for v in (nu_eff, e_gpa, sig_v_eff_mpa, pp_mpa)) or e_gpa == 0:
+        if "Depth" not in results_df.columns:
+            raise ValueError("Computed results do not contain a Depth column for LOT/FIT matching.")
+        depths = pd.to_numeric(results_df["Depth"], errors="coerce").to_numpy(dtype=float)
+        finite_depth = np.isfinite(depths)
+        if not finite_depth.any():
+            raise ValueError("No finite log depths are available for LOT/FIT matching.")
+        log_depths = np.unique(depths[finite_depth])
+        if lot_depth < log_depths[0] or lot_depth > log_depths[-1]:
             raise ValueError(
-                f"Cannot calibrate: missing or invalid log data at the nearest available "
-                f"depth ({row['Depth']:.1f} m) to the requested LOT/FIT depth ({lot_depth:.1f} m)."
+                f"LOT/FIT depth {lot_depth:.2f} m is outside the log interval "
+                f"({log_depths[0]:.2f}–{log_depths[-1]:.2f} m); extrapolation is not allowed."
             )
 
-        e_pa = float(e_gpa) * 1e9
-        sig_v_eff_pa = float(sig_v_eff_mpa) * 1e6
-        pp_pa = float(pp_mpa) * 1e6
-        nu_eff = float(nu_eff)
+        sample_steps = np.diff(log_depths)
+        sample_steps = sample_steps[sample_steps > 0.0]
+        depth_tolerance_m = 0.5 * float(np.median(sample_steps)) if sample_steps.size else 0.0
+        row_position = int(np.argmin(np.where(finite_depth, np.abs(depths - lot_depth), np.inf)))
+        row = results_df.iloc[row_position]
+        matched_depth = float(depths[row_position])
+        depth_offset_m = abs(matched_depth - lot_depth)
+        if depth_offset_m > depth_tolerance_m + 1e-9:
+            raise ValueError(
+                f"LOT/FIT depth is {depth_offset_m:.2f} m from the nearest log sample, beyond "
+                f"half the median sampling interval ({depth_tolerance_m:.2f} m). "
+                "Use a closer log sample or provide a supported depth interpolation."
+            )
 
+        required = (
+            "Nu_Eff", "Youngs_Modulus_GPa", "Sig_V_Eff_MPa",
+            "Pore_Pressure_Pp_MPa", "Overburden_Stress_Sv_MPa",
+        )
+        missing = [column for column in required if column not in results_df.columns]
+        if missing:
+            raise ValueError(f"Cannot calibrate: required log-derived fields are missing: {', '.join(missing)}.")
+        nu_eff = row["Nu_Eff"]
+        e_gpa = row["Youngs_Modulus_GPa"]
+        sig_v_eff_mpa = row["Sig_V_Eff_MPa"]
+        pp_mpa = row["Pore_Pressure_Pp_MPa"]
+        sv_mpa = row["Overburden_Stress_Sv_MPa"]
+        values = [nu_eff, e_gpa, sig_v_eff_mpa, pp_mpa, sv_mpa]
+        if any(pd.isna(value) or not np.isfinite(float(value)) for value in values):
+            raise ValueError(
+                f"Cannot calibrate: required log data are missing or non-finite at the nearest "
+                f"sample depth ({matched_depth:.2f} m)."
+            )
+        nu_eff, e_gpa, sig_v_eff_mpa, pp_mpa, sv_mpa = map(float, values)
+        if not 0.0 < nu_eff < 1.0 or e_gpa <= 0.0 or sig_v_eff_mpa <= 0.0 or sv_mpa <= 0.0 or pp_mpa < 0.0:
+            raise ValueError("Cannot calibrate: nearest-sample elastic or pressure properties are not physical.")
+
+        e_pa = e_gpa * 1e9
+        sig_v_eff_pa = sig_v_eff_mpa * 1e6
+        pp_pa = pp_mpa * 1e6
+        plane_strain_factor = 1.0 - nu_eff**2
+        baseline_without_ey_pa = (
+            (nu_eff / (1.0 - nu_eff)) * sig_v_eff_pa
+            + (e_pa / plane_strain_factor) * (nu_eff * tectonic_ex)
+        )
         target_shmin_eff_pa = (lot_pressure_mpa * 1e6) - biot_alpha * pp_pa
-        baseline_shmin_eff_pa = (nu_eff / (1.0 - nu_eff)) * sig_v_eff_pa
-        
-        # Consistent with (1 - nu^2) in generalized plane strain
-        tectonic_ey_solved = (target_shmin_eff_pa - baseline_shmin_eff_pa) * (1.0 - nu_eff**2) / e_pa
+        tectonic_ey_solved = (
+            (target_shmin_eff_pa - baseline_without_ey_pa)
+            * plane_strain_factor / e_pa
+        )
 
-        achievable_min_mpa = float(pp_mpa) + 0.5
-        achievable_max_mpa = float(row["Overburden_Stress_Sv_MPa"])
+        achievable_min_mpa = pp_mpa + 0.5
+        achievable_max_mpa = 0.98 * sv_mpa
         within_range = achievable_min_mpa <= lot_pressure_mpa <= achievable_max_mpa
+        initial_shmin_eff_pa = baseline_without_ey_pa + (e_pa / plane_strain_factor) * initial_tectonic_ey
 
         return {
             "tectonic_ey": float(tectonic_ey_solved),
-            "matched_depth": float(row["Depth"]),
-            "uncalibrated_shmin_mpa": float((baseline_shmin_eff_pa + biot_alpha * pp_pa) / 1e6),
-            "achievable_min_mpa": achievable_min_mpa,
-            "achievable_max_mpa": achievable_max_mpa,
-            "within_range": within_range,
+            "matched_depth": matched_depth,
+            "requested_depth": lot_depth,
+            "depth_offset_m": float(depth_offset_m),
+            "depth_tolerance_m": float(depth_tolerance_m),
+            "uncalibrated_shmin_mpa": float((initial_shmin_eff_pa + biot_alpha * pp_pa) / 1e6),
+            "achievable_min_mpa": float(achievable_min_mpa),
+            "achievable_max_mpa": float(achievable_max_mpa),
+            "within_range": bool(within_range),
+            "calibration_applied": bool(within_range),
         }
     # =========================================================
     # Deviated/Horizontal Wells Stability Patch

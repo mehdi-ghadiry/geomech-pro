@@ -141,14 +141,19 @@ async def compute_mem(
     Runs the full 1D MEM + Mud Weight Window computation on an uploaded
     LAS, CSV, TXT, or XLSX well-log file and returns the results as JSON records.
 
-    If lot_depth and lot_pressure_mpa are both given, this runs the
-    computation twice: once to get the log-derived quantities needed to
-    calibrate against the field-measured LOT/FIT point, then again with
-    the solved tectonic_ey so the whole log reflects that calibration.
+    If lot_depth and lot_pressure_mpa are both given, the model matches the
+    nearest log sample within half the median sampling interval, then checks
+    the attainable Shmin range. It applies the solved tectonic_ey and
+    recomputes only when the target is achievable.
     The manually-entered `tectonic_ey` is used as-is when no LOT/FIT
     point is given.
     """
     try:
+        if (lot_depth is None) != (lot_pressure_mpa is None):
+            raise HTTPException(
+                status_code=422,
+                detail="LOT/FIT depth and pressure must be supplied together.",
+            )
         file_bytes = await las_file.read()
         df, columns = core.load_well_log(file_bytes, las_file.filename or "")
 
@@ -183,10 +188,19 @@ async def compute_mem(
 
         calibration_info: Optional[Dict[str, Any]] = None
         if lot_depth is not None and lot_pressure_mpa is not None:
-            calib = core.solve_tectonic_ey_for_lot(results_df, lot_depth, lot_pressure_mpa, biot_alpha)
-            tectonic_ey = calib["tectonic_ey"]
-            results_df = core.compute_1d_mem(tectonic_ey=tectonic_ey, **common_params)
+            calib = core.solve_tectonic_ey_for_lot(
+                results_df,
+                lot_depth,
+                lot_pressure_mpa,
+                biot_alpha,
+                tectonic_ex=tectonic_ex,
+                initial_tectonic_ey=tectonic_ey,
+            )
             calibration_info = calib
+            # Do not silently clip an impossible LOT/FIT target and call it calibrated.
+            if calib["calibration_applied"]:
+                tectonic_ey = calib["tectonic_ey"]
+                results_df = core.compute_1d_mem(tectonic_ey=tectonic_ey, **common_params)
 
     except HTTPException:
         raise
