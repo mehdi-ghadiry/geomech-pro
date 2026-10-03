@@ -379,7 +379,7 @@ if results_df is not None:
         # Display Deviated collapse MW if available, else standard collapse MW
         disp_col_mw = "Deviated_Collapse_EMW_SG" if ("Deviated_Collapse_EMW_SG" in results_df and well_inclination > 0) else "Collapse_EMW_SG"
         c4.metric(f"Min MW ({well_inclination:.0f}° Incl)", f"{results_df[disp_col_mw].mean():.2f} SG" if disp_col_mw in results_df else "N/A")
-        c5.metric("Safe Frac Margin", f"{results_df['Shmin_EMW_SG'].mean():.2f} SG" if "Shmin_EMW_SG" in results_df else "N/A")
+        c5.metric("Mean Shmin Screen", f"{results_df['Shmin_EMW_SG'].mean():.2f} SG" if "Shmin_EMW_SG" in results_df else "N/A")
 
         # Tab Structure
         tab1, tab2, tab3 = st.tabs([
@@ -440,9 +440,11 @@ if results_df is not None:
             if "Deviated_Collapse_EMW_SG" in results_df and well_inclination > 0:
                 fig.add_trace(go.Scatter(x=results_df["Deviated_Collapse_EMW_SG"], y=depth, name=f"Deviated Collapse ({well_inclination:.0f}°)", line=dict(color="#FF5252", width=2.5, dash="dash")), row=1, col=4)
             if "Shmin_EMW_SG" in results_df:
-                fig.add_trace(go.Scatter(x=results_df["Shmin_EMW_SG"], y=depth, name="Losses Limit (Shmin)", line=dict(color="#FF9100", width=1.8, dash="dash")), row=1, col=4)
+                fig.add_trace(go.Scatter(x=results_df["Shmin_EMW_SG"], y=depth, name="Shmin Opening/Propagation Screen", line=dict(color="#FF9100", width=1.8, dash="dash")), row=1, col=4)
+            if "Tensile_Breakdown_EMW_SG" in results_df:
+                fig.add_trace(go.Scatter(x=results_df["Tensile_Breakdown_EMW_SG"], y=depth, name="Tensile Initiation Estimate (Vertical)", line=dict(color="#2979FF", width=1.5, dash="dot")), row=1, col=4)
             if "Fracture_EMW_SG" in results_df:
-                fig.add_trace(go.Scatter(x=results_df["Fracture_EMW_SG"], y=depth, name="Fracture Breakdown", line=dict(color="#2979FF", width=1.5, dash="dot")), row=1, col=4)
+                fig.add_trace(go.Scatter(x=results_df["Fracture_EMW_SG"], y=depth, name="Conservative Upper Screen", line=dict(color="#651FFF", width=2)), row=1, col=4)
 
             fig.update_yaxes(title_text=depth_label, autorange="reversed", row=1, col=1)
             fig.update_xaxes(title_text="Moduli (GPa)", row=1, col=1)
@@ -538,7 +540,7 @@ if results_df is not None:
             if sim_mud_sg < rec_collapse:
                 stability_status = "⚠️ Shear Breakout (MW Too Low)"
             elif sim_mud_sg > rec_frac:
-                stability_status = "💥 Tensile Fracture (MW Too High)"
+                stability_status = "⚠️ Conservative fracture/propagation screen exceeded"
             else:
                 stability_status = "✅ Borehole Stable"
             m4.metric("Stability State", stability_status)

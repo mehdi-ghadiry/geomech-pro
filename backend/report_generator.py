@@ -22,6 +22,27 @@ def _pdf_safe(text: str) -> str:
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
+def _full_interval_screening_window(results_df: pd.DataFrame) -> dict:
+    """Return the overlap of depthwise lower/upper screening limits, never a mean window."""
+    required = ("Pore_Pressure_EMW_SG", "Collapse_EMW_SG", "Fracture_EMW_SG")
+    if any(column not in results_df.columns for column in required) or results_df.empty:
+        return {"valid": False, "exists": False, "lower_sg": None, "upper_sg": None}
+    pore = pd.to_numeric(results_df["Pore_Pressure_EMW_SG"], errors="coerce").to_numpy(dtype=float)
+    collapse = pd.to_numeric(results_df["Collapse_EMW_SG"], errors="coerce").to_numpy(dtype=float)
+    upper = pd.to_numeric(results_df["Fracture_EMW_SG"], errors="coerce").to_numpy(dtype=float)
+    lower = np.maximum(pore, collapse)
+    if not (np.isfinite(lower).all() and np.isfinite(upper).all()):
+        return {"valid": False, "exists": False, "lower_sg": None, "upper_sg": None}
+    lower_sg = float(np.max(lower))
+    upper_sg = float(np.min(upper))
+    return {
+        "valid": True,
+        "exists": bool(lower_sg <= upper_sg),
+        "lower_sg": lower_sg,
+        "upper_sg": upper_sg,
+    }
+
+
 class PDFReport(FPDF):
     def header(self):
         # Header banner
@@ -100,6 +121,8 @@ def generate_pdf_report(
     mean_sv = results_df["Overburden_Stress_Sv_MPa"].mean()
     mean_collapse_emw = results_df["Collapse_EMW_SG"].mean()
     mean_frac_emw = results_df["Fracture_EMW_SG"].mean()
+    mean_tensile_breakdown_emw = results_df["Tensile_Breakdown_EMW_SG"].mean() if "Tensile_Breakdown_EMW_SG" in results_df else float("nan")
+    full_interval_window = _full_interval_screening_window(results_df)
     if "Pore_Pressure_Estimate_Valid" in results_df.columns:
         valid_pressure_count = int(pd.to_numeric(results_df["Pore_Pressure_Estimate_Valid"], errors="coerce").fillna(0).sum())
     else:
@@ -143,7 +166,8 @@ def generate_pdf_report(
         ("Maximum Horizontal Stress (MPa)", "SHmax_MPa"),
         ("Overburden Stress (MPa)", "Overburden_Stress_Sv_MPa"),
         ("Shear Collapse EMW (SG)", "Collapse_EMW_SG"),
-        ("Fracture Breakdown EMW (SG)", "Fracture_EMW_SG"),
+        ("Tensile Breakdown Estimate (SG)", "Tensile_Breakdown_EMW_SG"),
+        ("Conservative Upper Screen (SG)", "Fracture_EMW_SG"),
     ]
 
     for label, col in params:
@@ -165,24 +189,31 @@ def generate_pdf_report(
     pdf.set_font("helvetica", "", 10)
     pdf.set_text_color(50, 50, 50)
 
-    if invalid_pressure_count:
+    if invalid_pressure_count or not full_interval_window["valid"]:
         operational_recommendation = (
-            f"Pressure-derived results are missing at {invalid_pressure_count} of {len(results_df)} samples. "
-            "No full-interval operational mud-weight recommendation is provided; calibrate the sonic trend and validate against field data."
+            f"Pressure-derived inputs are missing or QC-invalid at {invalid_pressure_count} of {len(results_df)} samples, "
+            "or the full-depth limits are incomplete. No full-interval mud-weight screen is available."
+        )
+    elif not full_interval_window["exists"]:
+        operational_recommendation = (
+            f"No overlapping full-depth screening window exists: the highest lower limit is "
+            f"{full_interval_window['lower_sg']:.2f} SG and the lowest upper limit is "
+            f"{full_interval_window['upper_sg']:.2f} SG. Do not interpret mean curves as a safe window."
         )
     else:
         operational_recommendation = (
-            f"Maintain active drilling mud weight securely within the screening window "
-            f"[{mean_collapse_emw:.2f} SG - {mean_frac_emw:.2f} SG]. This is not a substitute for field calibration."
+            f"The model's full-depth screening overlap is [{full_interval_window['lower_sg']:.2f} SG - "
+            f"{full_interval_window['upper_sg']:.2f} SG]. This is not an operational recommendation; "
+            "validate pressure, stresses, strength, and fracture behavior against local field data."
         )
 
     mww_text = (
         f"Based on the Mohr-Coulomb failure criterion and elastic stress distribution around a vertical wellbore:\n"
         f"- **Shear Failure (Collapse) Gradient:** Averages {mean_collapse_emw:.2f} SG, representing the minimum required "
         f"mud density to prevent breakouts and wellbore sloughing.\n"
-        f"- **Tensile Failure (Fracture) Gradient:** Averages {mean_frac_emw:.2f} SG, defining the upper operational limit "
-        f"to prevent lost circulation and mud losses.\n"
-        f"- **Operational Recommendation:** {operational_recommendation}"
+        f"- **Tensile breakdown estimate:** Averages {mean_tensile_breakdown_emw:.2f} SG from a vertical-well Kirsch tensile criterion; tensile strength is estimated as UCS/12, not measured.\n"
+        f"- **Conservative upper screening curve:** Averages {mean_frac_emw:.2f} SG and is the lower of the tensile-breakdown estimate and Shmin screen. It is not a calibrated loss/fracture limit.\n"
+        f"- **Full-interval screen:** {operational_recommendation}"
     )
     pdf.multi_cell(0, 5, mww_text)
     pdf.ln(8)
