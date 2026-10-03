@@ -366,12 +366,19 @@ class GeomechanicsCore:
         out["Biot_Coefficient"] = biot_alpha
 
         # --- Unit normalization ---
+        sonic_unit_key = str(sonic_unit or "").strip().lower()
+        density_unit_key = str(density_unit or "").strip().lower()
+        if sonic_unit_key not in {"us/ft", "us/m"}:
+            raise ValueError("Sonic unit must be explicitly selected as us/ft or us/m.")
+        if density_unit_key not in {"g/cm3", "kg/m3"}:
+            raise ValueError("Density unit must be explicitly selected as g/cm3 or kg/m3.")
+
         dt = pd.to_numeric(df[dt_col], errors="coerce").values.copy()
-        if sonic_unit == "us/m":
+        if sonic_unit_key == "us/m":
             dt = dt / 3.28084
 
         rhob = pd.to_numeric(df[rhob_col], errors="coerce").values.copy()
-        if density_unit == "kg/m3":
+        if density_unit_key == "kg/m3":
             rhob = rhob / 1000.0
 
         # --- Outlier rejection & Quality Control (QC) ---
@@ -390,7 +397,7 @@ class GeomechanicsCore:
         # --- Shear sonic: measured DTS or explicitly selected lithology fit ---
         if dts_col is not None:
             dts = pd.to_numeric(df[dts_col], errors="coerce").values.copy()
-            if sonic_unit == "us/m":
+            if sonic_unit_key == "us/m":
                 dts = dts / 3.28084
             dts = np.where((dts < 35.0) | (dts > 500.0), np.nan, dts)
             dts = self._interpolate_short_internal_gaps(dts, max_gap=5)
