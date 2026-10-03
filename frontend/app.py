@@ -33,6 +33,7 @@ from plotly.subplots import make_subplots
 
 import api_client
 from api_client import BackendError
+from depth_units import depth_from_meters, depth_to_meters
 from config import (
     DEVELOPER_EMAIL,
     DEVELOPER_NAME,
@@ -324,15 +325,16 @@ elif uploaded_file is not None:
 
         calib_info = compute_result.get("calibration")
         if calib_info:
+            matched_depth_display = float(depth_from_meters(calib_info["matched_depth"], depth_unit))
             if calib_info["within_range"]:
                 st.success(
-                    f"📏 Calibrated using your LOT/FIT point at {calib_info['matched_depth']:.1f} m — "
+                    f"📏 Calibrated using your LOT/FIT point at {matched_depth_display:.1f} {depth_unit} — "
                     f"solved tectonic εy = {calib_info['tectonic_ey']:.6f} (was {calib_info['uncalibrated_shmin_mpa']:.1f} MPa "
                     f"before calibration)."
                 )
             else:
                 st.warning(
-                    f"⚠️ Your LOT/FIT pressure isn't physically achievable at {calib_info['matched_depth']:.1f} m "
+                    f"⚠️ Your LOT/FIT pressure isn't physically achievable at {matched_depth_display:.1f} {depth_unit} "
                     f"given this well's pore pressure and overburden -- the valid range there is "
                     f"{calib_info['achievable_min_mpa']:.1f}–{calib_info['achievable_max_mpa']:.1f} MPa."
                 )
@@ -344,9 +346,11 @@ elif uploaded_file is not None:
         st.error(f"❌ Execution Error: {str(e)}")
 
 if results_df is not None:
+    display_depth = depth_from_meters(results_df["Depth"], depth_unit)
+    depth_label = f"Depth ({depth_unit})"
     try:
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Depth Interval", f"{results_df['Depth'].min():.0f} - {results_df['Depth'].max():.0f} m")
+        c1.metric("Depth Interval", f"{display_depth.min():.0f} - {display_depth.max():.0f} {depth_unit}")
         c2.metric("Mean Sv", f"{results_df['Overburden_Stress_Sv_MPa'].mean():.1f} MPa" if "Overburden_Stress_Sv_MPa" in results_df else "N/A")
         c3.metric("Mean Pore Press", f"{results_df['Pore_Pressure_Pp_MPa'].mean():.1f} MPa" if "Pore_Pressure_Pp_MPa" in results_df else "N/A")
         
@@ -380,7 +384,7 @@ if results_df is not None:
                 ),
             )
 
-            depth = results_df["Depth"]
+            depth = display_depth
 
             # Track 1: Elastic Moduli
             if "Youngs_Modulus_GPa" in results_df:
@@ -418,7 +422,7 @@ if results_df is not None:
             if "Fracture_EMW_SG" in results_df:
                 fig.add_trace(go.Scatter(x=results_df["Fracture_EMW_SG"], y=depth, name="Fracture Breakdown", line=dict(color="#2979FF", width=1.5, dash="dot")), row=1, col=4)
 
-            fig.update_yaxes(title_text="Depth (m)", autorange="reversed", row=1, col=1)
+            fig.update_yaxes(title_text=depth_label, autorange="reversed", row=1, col=1)
             fig.update_xaxes(title_text="Moduli (GPa)", row=1, col=1)
             fig.update_xaxes(title_text="Strength (MPa)", row=1, col=2)
             fig.update_xaxes(title_text="Stress (MPa)", row=1, col=3)
@@ -452,16 +456,19 @@ if results_df is not None:
             # UI Controls
             col_depth, col_mud, col_r = st.columns(3)
             with col_depth:
-                target_depth = st.slider(
-                    "Select Depth (m)",
-                    float(results_df["Depth"].min()),
-                    float(results_df["Depth"].max()),
-                    float(results_df["Depth"].mean()),
-                    step=0.5,
+                target_depth_display = st.slider(
+                    f"Select Depth ({depth_unit})",
+                    float(display_depth.min()),
+                    float(display_depth.max()),
+                    float(display_depth.mean()),
+                    step=0.5 if depth_unit == "m" else 1.0,
                 )
 
-            # Locate nearest row in results
-            nearest_idx = (results_df["Depth"] - target_depth).abs().idxmin()
+            # UI uses the selected unit; all calculations remain in metres.
+            target_depth_m = depth_to_meters(target_depth_display, depth_unit)
+
+            # Locate nearest row using the displayed depth values.
+            nearest_idx = (display_depth - target_depth_display).abs().idxmin()
             row_data = results_df.loc[nearest_idx]
 
             def get_val(key_list, default_val):
@@ -497,7 +504,7 @@ if results_df is not None:
             friction_ang = get_val(["Friction_Angle_deg", "Phi_deg", "Internal_Friction_deg"], 30.0)
 
             # Mud pressure calculation: Pw (MPa)
-            pw = (sim_mud_sg * 1000.0) * 9.80665 * target_depth / 1e6
+            pw = (sim_mud_sg * 1000.0) * 9.80665 * target_depth_m / 1e6
 
             # Diagnostic Status
             m1, m2, m3, m4 = st.columns(4)
@@ -641,16 +648,17 @@ if results_df is not None:
             col_dev_ctl1, col_dev_ctl2 = st.columns([2, 1])
 
             with col_dev_ctl1:
-                target_depth_dev = st.slider(
-                    "Evaluation Depth for Trajectory Analysis (m)",
-                    float(results_df["Depth"].min()),
-                    float(results_df["Depth"].max()),
-                    float(results_df["Depth"].mean()),
+                target_depth_dev_display = st.slider(
+                    f"Evaluation Depth for Trajectory Analysis ({depth_unit})",
+                    float(display_depth.min()),
+                    float(display_depth.max()),
+                    float(display_depth.mean()),
                     step=1.0,
                     key="dev_depth_slider",
                 )
 
-            dev_row_idx = (results_df["Depth"] - target_depth_dev).abs().idxmin()
+            target_depth_dev_m = depth_to_meters(target_depth_dev_display, depth_unit)
+            dev_row_idx = (display_depth - target_depth_dev_display).abs().idxmin()
             d_row = results_df.loc[dev_row_idx]
 
             d_sv = float(d_row.get("Overburden_Stress_Sv_MPa", 50.0))
@@ -672,7 +680,7 @@ if results_df is not None:
             # Prepare Payload for Backend
             dev_payload = {
                 "results": results_df.to_dict(orient="records"),
-                "depth_m": float(target_depth_dev),
+                "depth_m": float(target_depth_dev_m),
                 "well_inclination_deg": float(well_inclination),
                 "well_azimuth_deg": float(well_azimuth),
                 "shmax_azimuth_deg": float(shmax_azimuth),
@@ -767,7 +775,7 @@ if results_df is not None:
                 st.plotly_chart(fig_dev, use_container_width=True)
 
                 st.success(
-                    f"✅ **Trajectory Evaluation at {target_depth_dev:.1f} m:** "
+                    f"✅ **Trajectory Evaluation at {target_depth_dev_display:.1f} {depth_unit}:** "
                     f"Minimum required mud weight to prevent borehole breakout is **{collapse_emw:.2f} SG**."
                 )
 
@@ -803,7 +811,7 @@ if active_df is not None:
             if uploaded_file is not None:
                 well_id = uploaded_file.name.rsplit(".", 1)[0]
                 
-            pdf_bytes = generate_pdf_report(active_df, well_name=well_id)
+            pdf_bytes = generate_pdf_report(active_df, well_name=well_id, depth_unit=depth_unit)
             
             st.download_button(
                 label="📄 Download 1D MEM Report (PDF)",
@@ -817,7 +825,11 @@ if active_df is not None:
 
     # 2. دانلود فایل CSV داده‌ها
     with col_exp2:
-        csv_data = active_df.to_csv(index=False).encode('utf-8')
+        export_df = active_df.copy()
+        if "Depth" in export_df.columns:
+            export_df["Depth"] = depth_from_meters(export_df["Depth"], depth_unit)
+            export_df.rename(columns={"Depth": f"Depth ({depth_unit})"}, inplace=True)
+        csv_data = export_df.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 Download Processed Log Data (CSV)",
             data=csv_data,

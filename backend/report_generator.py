@@ -47,12 +47,22 @@ class PDFReport(FPDF):
 
 
 
-def generate_pdf_report(results_df: pd.DataFrame, well_name: str = "Well-01") -> bytes:
+def generate_pdf_report(
+    results_df: pd.DataFrame,
+    well_name: str = "Well-01",
+    depth_unit: str = "m",
+) -> bytes:
     """
     Generates a professional engineering PDF report including 1D MEM,
     Rock Strength, In-Situ Stresses, and Wellbore Stability MWW summary.
     """
     well_name_safe = _pdf_safe(well_name)
+    if depth_unit not in {"m", "ft"}:
+        raise ValueError("depth_unit must be 'm' or 'ft'")
+    feet_per_metre = 3.280839895013123
+    depth_factor = feet_per_metre if depth_unit == "ft" else 1.0
+    depth_min = results_df["Depth"].min() * depth_factor
+    depth_max = results_df["Depth"].max() * depth_factor
 
     pdf = PDFReport()
     pdf.well_name = well_name_safe
@@ -69,7 +79,7 @@ def generate_pdf_report(results_df: pd.DataFrame, well_name: str = "Well-01") ->
     pdf.cell(
         0,
         6,
-        f"Analyzed Depth Interval: {results_df['Depth'].min():.1f} m to {results_df['Depth'].max():.1f} m (Total Samples: {len(results_df)})",
+        f"Analyzed Depth Interval: {depth_min:.1f} {depth_unit} to {depth_max:.1f} {depth_unit} (Total Samples: {len(results_df)})",
         0,
         1,
         "L",
