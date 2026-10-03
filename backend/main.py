@@ -131,6 +131,7 @@ async def compute_mem(
     eaton_n: float = Form(3.0),
     tectonic_ex: float = Form(0.0005),
     tectonic_ey: float = Form(0.0002),
+    stress_regime: str = Form("normal_faulting"),
     sonic_unit: str = Form("us/ft"),
     density_unit: str = Form("g/cm3"),
     assumed_shallow_density: float = Form(2.0),
@@ -145,8 +146,10 @@ async def compute_mem(
     nearest log sample within half the median sampling interval, then checks
     the attainable Shmin range. It applies the solved tectonic_ey and
     recomputes only when the target is achievable.
-    The manually-entered `tectonic_ey` is used as-is when no LOT/FIT
-    point is given.
+    The selected Andersonian stress regime is checked against the raw
+    poroelastic stress calculation; unsupported samples are withheld rather
+    than forced into an arbitrary stress range. The manually-entered
+    `tectonic_ey` is used as-is when no LOT/FIT point is given.
     """
     try:
         if (lot_depth is None) != (lot_pressure_mpa is None):
@@ -179,6 +182,7 @@ async def compute_mem(
             normal_trend_calibrated=normal_trend_calibrated,
             eaton_n=eaton_n,
             tectonic_ex=tectonic_ex,
+            stress_regime=stress_regime,
             sonic_unit=sonic_unit,
             density_unit=density_unit,
             assumed_shallow_density=assumed_shallow_density,
@@ -195,6 +199,7 @@ async def compute_mem(
                 biot_alpha,
                 tectonic_ex=tectonic_ex,
                 initial_tectonic_ey=tectonic_ey,
+                stress_regime=stress_regime,
             )
             calibration_info = calib
             # Do not silently clip an impossible LOT/FIT target and call it calibrated.

@@ -200,8 +200,14 @@ class GeomechanicsCore:
         """Estimate DTS using the Castagna mudrock line for selected wet clastics only."""
         dt_us_ft = np.asarray(dt_us_ft, dtype=float)
         vp_ft_s = 1e6 / np.where(dt_us_ft > 0.0, dt_us_ft, np.nan)
-        vs_ft_s = np.maximum(0.8621 * vp_ft_s - 3846.4, 100.0)
-        return 1e6 / vs_ft_s
+        vs_ft_s = 0.8621 * vp_ft_s - 3846.4
+        # The empirical fit is nonphysical when it predicts zero/negative Vs.
+        # Preserve that as missing data instead of flooring it to an invented
+        # velocity that would create an apparently valid DTS and elastic model.
+        valid_vs = np.isfinite(vs_ft_s) & (vs_ft_s > 0.0)
+        dts_us_ft = np.full_like(vs_ft_s, np.nan, dtype=float)
+        np.divide(1e6, vs_ft_s, out=dts_us_ft, where=valid_vs)
+        return dts_us_ft
 
     @staticmethod
     def _carbonate_empirical_dts_us_ft(dt_us_ft, carbonate_lithology):
@@ -289,6 +295,7 @@ class GeomechanicsCore:
         eaton_n=3.0,
         tectonic_ex=0.0,      # Corrected default to zero-strain baseline
         tectonic_ey=0.0,      # Corrected default to zero-strain baseline
+        stress_regime="normal_faulting",
         sonic_unit="us/ft",
         density_unit="g/cm3",
         gassi_poisson=0.40,
@@ -306,6 +313,15 @@ class GeomechanicsCore:
         biot_alpha = float(biot_alpha)
         if not np.isfinite(biot_alpha) or not 0.0 <= biot_alpha <= 1.0:
             raise ValueError("Biot coefficient must be between 0 and 1.")
+        tectonic_ex = float(tectonic_ex)
+        tectonic_ey = float(tectonic_ey)
+        if not np.isfinite([tectonic_ex, tectonic_ey]).all():
+            raise ValueError("Tectonic strains must be finite numbers.")
+        stress_regime = str(stress_regime or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if stress_regime not in {"normal_faulting", "strike_slip", "reverse_faulting"}:
+            raise ValueError(
+                "Stress regime must be normal_faulting, strike_slip, or reverse_faulting."
+            )
         dt_matrix = float(dt_matrix)
         dt_surface = float(dt_surface)
         compaction_coefficient = float(compaction_coefficient)
@@ -400,8 +416,17 @@ class GeomechanicsCore:
                     "Mixed/unknown lithology requires measured DTS or local calibration."
                 )
         if not np.isfinite(dts).any():
+            if vs_estimation_method.startswith("Castagna"):
+                raise ValueError(
+                    "The Castagna mudrock-line estimate is non-positive across the interval; "
+                    "it cannot provide a physical Vs/DTS. Check the DT data and whether this "
+                    "empirical relation is suitable for the selected formation."
+                )
             raise ValueError("No valid DTS values remain after unit conversion and quality screening.")
+        vs_estimation_valid = np.isfinite(dts) & (dts > 0.0)
         out["Vs_Estimation_Method"] = vs_estimation_method
+        out["Vs_Estimation_Valid"] = vs_estimation_valid.astype(int)
+        out["Vs_Estimation_QC_Flag"] = (~vs_estimation_valid).astype(int)
 
         # --- Dynamic Elastic Moduli (GPa) ---
         rho_kg = rhob * 1000.0
@@ -534,10 +559,43 @@ class GeomechanicsCore:
         shmin_calc = (shmin_eff + biot_alpha * pp_pa) / 1e6
         shmax_calc = (shmax_eff + biot_alpha * pp_pa) / 1e6
 
-        # Enforce physical stress ordering: Pp < Shmin <= SHmax
-        # In normal faulting regime: Pp < Shmin < SHmax < Sv
-        out["Shmin_MPa"] = np.clip(shmin_calc, pp + 0.5, sv * 0.98)
-        out["SHmax_MPa"] = np.clip(shmax_calc, out["Shmin_MPa"], sv * 1.15)
+        # Preserve the constitutive-model stresses without arbitrary clipping.
+        # Apply the selected Andersonian regime as a QC gate: inconsistent or
+        # unsupported samples remain visible in the raw columns, but are withheld
+        # from downstream failure and mud-window calculations.
+        regime_rules = {
+            "normal_faulting": "Shmin ≤ SHmax ≤ Sv",
+            "strike_slip": "Shmin ≤ Sv ≤ SHmax",
+            "reverse_faulting": "Sv ≤ Shmin ≤ SHmax",
+        }
+        out["Shmin_Raw_MPa"] = shmin_calc
+        out["SHmax_Raw_MPa"] = shmax_calc
+        out["Stress_Regime"] = stress_regime
+        out["Stress_Regime_Rule"] = regime_rules[stress_regime]
+        finite_stress = (
+            np.isfinite(shmin_calc) & np.isfinite(shmax_calc)
+            & np.isfinite(sv) & np.isfinite(pp)
+        )
+        shmin_screen_pass = shmin_calc >= pp + 0.5
+        if stress_regime == "normal_faulting":
+            regime_order_pass = (shmin_calc <= shmax_calc) & (shmax_calc <= sv)
+        elif stress_regime == "strike_slip":
+            regime_order_pass = (shmin_calc <= sv) & (sv <= shmax_calc)
+        else:
+            regime_order_pass = (sv <= shmin_calc) & (shmin_calc <= shmax_calc)
+        stress_valid = finite_stress & shmin_screen_pass & regime_order_pass
+        qc_reason = np.full(len(out), "", dtype=object)
+        qc_reason[~finite_stress] = "Missing or non-finite stress inputs"
+        qc_reason[finite_stress & ~shmin_screen_pass] = "Shmin below the Pp + 0.5 MPa screening floor"
+        qc_reason[finite_stress & shmin_screen_pass & ~regime_order_pass] = (
+            f"Calculated stresses do not satisfy {regime_rules[stress_regime]}"
+        )
+        out["Stress_Regime_Valid"] = stress_valid.astype(int)
+        out["Stress_Regime_QC_Flag"] = (~stress_valid).astype(int)
+        out["Stress_Regime_QC_Reason"] = qc_reason
+        out["Shmin_Screening_Floor_MPa"] = pp + 0.5
+        out["Shmin_MPa"] = np.where(stress_valid, shmin_calc, np.nan)
+        out["SHmax_MPa"] = np.where(stress_valid, shmax_calc, np.nan)
 
         out["Nu_Eff"] = nu_eff
         out["Sig_V_Eff_MPa"] = sig_v_eff / 1e6
@@ -596,6 +654,7 @@ class GeomechanicsCore:
         biot_alpha: float = 1.0,
         tectonic_ex: float = 0.0,
         initial_tectonic_ey: float = 0.0,
+        stress_regime: str = "normal_faulting",
     ) -> dict:
         """Solve for tectonic_ey at the nearest sufficiently close log sample.
 
@@ -619,6 +678,11 @@ class GeomechanicsCore:
             raise ValueError("LOT/FIT depth must be non-negative and pressure must be positive.")
         if not 0.0 <= biot_alpha <= 1.0:
             raise ValueError("Biot coefficient must be between 0 and 1.")
+        stress_regime = str(stress_regime or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if stress_regime not in {"normal_faulting", "strike_slip", "reverse_faulting"}:
+            raise ValueError(
+                "Stress regime must be normal_faulting, strike_slip, or reverse_faulting."
+            )
 
         if "Depth" not in results_df.columns:
             raise ValueError("Computed results do not contain a Depth column for LOT/FIT matching.")
@@ -683,9 +747,33 @@ class GeomechanicsCore:
             * plane_strain_factor / e_pa
         )
 
-        achievable_min_mpa = pp_mpa + 0.5
-        achievable_max_mpa = 0.98 * sv_mpa
-        within_range = achievable_min_mpa <= lot_pressure_mpa <= achievable_max_mpa
+        # For a fixed tectonic_ex, the plane-strain equations imply
+        # SHmax = A + nu*Shmin, with A = (1-nu)*(B + alpha*Pp) + E*ex.
+        # Derive the attainable Shmin interval from the chosen Andersonian
+        # ordering instead of applying universal fractions of Sv.
+        total_base_pa = (nu_eff / (1.0 - nu_eff)) * sig_v_eff_pa + biot_alpha * pp_pa
+        regime_intercept_pa = (1.0 - nu_eff) * total_base_pa + e_pa * tectonic_ex
+        screening_floor_mpa = pp_mpa + 0.5
+        if stress_regime == "normal_faulting":
+            regime_lower_mpa = screening_floor_mpa
+            regime_upper_mpa = min(
+                regime_intercept_pa / (1.0 - nu_eff),
+                (sv_mpa * 1e6 - regime_intercept_pa) / nu_eff,
+            ) / 1e6
+        elif stress_regime == "strike_slip":
+            regime_lower_mpa = max(
+                screening_floor_mpa,
+                (sv_mpa * 1e6 - regime_intercept_pa) / (nu_eff * 1e6),
+            )
+            regime_upper_mpa = sv_mpa
+        else:
+            regime_lower_mpa = max(screening_floor_mpa, sv_mpa)
+            regime_upper_mpa = regime_intercept_pa / ((1.0 - nu_eff) * 1e6)
+        attainable_range_exists = regime_lower_mpa <= regime_upper_mpa
+        within_range = (
+            attainable_range_exists
+            and regime_lower_mpa <= lot_pressure_mpa <= regime_upper_mpa
+        )
         initial_shmin_eff_pa = baseline_without_ey_pa + (e_pa / plane_strain_factor) * initial_tectonic_ey
 
         return {
@@ -695,8 +783,10 @@ class GeomechanicsCore:
             "depth_offset_m": float(depth_offset_m),
             "depth_tolerance_m": float(depth_tolerance_m),
             "uncalibrated_shmin_mpa": float((initial_shmin_eff_pa + biot_alpha * pp_pa) / 1e6),
-            "achievable_min_mpa": float(achievable_min_mpa),
-            "achievable_max_mpa": float(achievable_max_mpa),
+            "achievable_min_mpa": float(regime_lower_mpa),
+            "achievable_max_mpa": float(regime_upper_mpa),
+            "attainable_range_exists": bool(attainable_range_exists),
+            "stress_regime": stress_regime,
             "within_range": bool(within_range),
             "calibration_applied": bool(within_range),
         }

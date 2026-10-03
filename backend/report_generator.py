@@ -128,6 +128,23 @@ def generate_pdf_report(
     else:
         valid_pressure_count = len(results_df)
     invalid_pressure_count = max(0, len(results_df) - valid_pressure_count)
+    if "Stress_Regime_QC_Flag" in results_df.columns:
+        invalid_stress_count = int(
+            pd.to_numeric(results_df["Stress_Regime_QC_Flag"], errors="coerce").fillna(1).sum()
+        )
+    else:
+        invalid_stress_count = 0
+    stress_regime = (
+        str(results_df["Stress_Regime"].dropna().iloc[0])
+        if "Stress_Regime" in results_df.columns and results_df["Stress_Regime"].notna().any()
+        else "not recorded"
+    )
+    if "Vs_Estimation_QC_Flag" in results_df.columns:
+        invalid_vs_count = int(
+            pd.to_numeric(results_df["Vs_Estimation_QC_Flag"], errors="coerce").fillna(1).sum()
+        )
+    else:
+        invalid_vs_count = 0
 
     summary_text = (
         f"This automated technical report presents the 1D Mechanical Earth Model (MEM) and Wellbore Stability analysis "
@@ -137,6 +154,10 @@ def generate_pdf_report(
         f"Minimum Horizontal Stress (Shmin) of {mean_shmin:.1f} MPa, and Maximum Horizontal Stress (SHmax) of {mean_shmax:.1f} MPa."
         + (f" WARNING: pressure-derived values were excluded at {invalid_pressure_count} of {len(results_df)} samples because the Eaton estimate failed physical screening. Do not use the mud-weight window as a full-interval operational recommendation; calibrate the local normal sonic trend."
            if invalid_pressure_count else "")
+        + (f" WARNING: {invalid_stress_count} samples failed the selected {stress_regime} stress-regime QC. Raw stress values remain in detailed results for diagnosis; dependent stress/failure outputs were withheld at those samples."
+           if invalid_stress_count else "")
+        + (f" WARNING: shear-velocity QC failed at {invalid_vs_count} samples; invalid Vs/DTS estimates were withheld from elastic calculations."
+           if invalid_vs_count else "")
     )
     pdf.multi_cell(0, 5, summary_text)
     pdf.ln(6)
@@ -189,10 +210,11 @@ def generate_pdf_report(
     pdf.set_font("helvetica", "", 10)
     pdf.set_text_color(50, 50, 50)
 
-    if invalid_pressure_count or not full_interval_window["valid"]:
+    if invalid_pressure_count or invalid_stress_count or not full_interval_window["valid"]:
         operational_recommendation = (
-            f"Pressure-derived inputs are missing or QC-invalid at {invalid_pressure_count} of {len(results_df)} samples, "
-            "or the full-depth limits are incomplete. No full-interval mud-weight screen is available."
+            f"Pressure-derived inputs are missing or QC-invalid at {invalid_pressure_count} of {len(results_df)} samples; "
+            f"stress-regime QC failed at {invalid_stress_count} of {len(results_df)} samples, or the full-depth limits are incomplete. "
+            "No full-interval mud-weight screen is available."
         )
     elif not full_interval_window["exists"]:
         operational_recommendation = (

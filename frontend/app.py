@@ -210,6 +210,21 @@ with st.sidebar:
                  "typical near-surface sediment density.",
         )
         tectonic_ex = st.number_input("Tectonic Strain εx (SHmax direction)", value=0.0005, format="%.5f")
+        stress_regime_label = st.selectbox(
+            "Assumed Andersonian stress regime",
+            ["Normal faulting", "Strike-slip", "Reverse faulting"],
+            index=0,
+            help=(
+                "This is an explicit model assumption, not an automatic field determination. "
+                "Stress values that do not satisfy the selected principal-stress ordering are "
+                "kept as raw diagnostics and withheld from dependent failure calculations."
+            ),
+        )
+        stress_regime = {
+            "Normal faulting": "normal_faulting",
+            "Strike-slip": "strike_slip",
+            "Reverse faulting": "reverse_faulting",
+        }[stress_regime_label]
 
         use_lot_calibration = st.checkbox(
             "📏 Calibrate εy with a LOT/FIT measurement",
@@ -239,7 +254,13 @@ if st.session_state["loaded_well_id"] is not None:
     # --- Viewing a previously saved well from the user's account ---
     try:
         well_detail = api_client.get_well(st.session_state["auth_token"], st.session_state["loaded_well_id"])
-        results_df = pd.DataFrame(well_detail["results"]).apply(pd.to_numeric, errors="coerce")
+        results_df = pd.DataFrame(well_detail["results"])
+        text_diagnostic_columns = {
+            "Vs_Estimation_Method", "Stress_Regime", "Stress_Regime_Rule", "Stress_Regime_QC_Reason"
+        }
+        for column in results_df.columns:
+            if column not in text_diagnostic_columns:
+                results_df[column] = pd.to_numeric(results_df[column], errors="coerce")
         active_well_name = well_detail["well_name"]
         compute_params_used = well_detail.get("params", {})
         data_source = "saved"
@@ -359,6 +380,7 @@ elif uploaded_file is not None:
             "normal_trend_calibrated": normal_trend_calibrated,
             "eaton_n": eaton_exp,
             "tectonic_ex": tectonic_ex,
+            "stress_regime": stress_regime,
             "sonic_unit": sonic_unit,
             "density_unit": density_unit,
             "assumed_shallow_density": assumed_shallow_density,
@@ -376,7 +398,12 @@ elif uploaded_file is not None:
             compute_result = api_client.compute_mem(file_bytes, uploaded_file.name, compute_params)
 
         results_df = pd.DataFrame(compute_result["results"])
-        results_df = results_df.apply(pd.to_numeric, errors="coerce")
+        text_diagnostic_columns = {
+            "Vs_Estimation_Method", "Stress_Regime", "Stress_Regime_Rule", "Stress_Regime_QC_Reason"
+        }
+        for column in results_df.columns:
+            if column not in text_diagnostic_columns:
+                results_df[column] = pd.to_numeric(results_df[column], errors="coerce")
         lower_hits = int(results_df.get("Pore_Pressure_Lower_Bound_Hit", pd.Series(0, index=results_df.index)).fillna(0).sum())
         upper_hits = int(results_df.get("Pore_Pressure_Upper_Bound_Hit", pd.Series(0, index=results_df.index)).fillna(0).sum())
         invalid_pp = int((1 - results_df.get("Pore_Pressure_Estimate_Valid", pd.Series(0, index=results_df.index)).fillna(0)).sum())
@@ -394,8 +421,17 @@ elif uploaded_file is not None:
             if invalid_elastic:
                 st.warning(
                     f"Elastic-property QC failed at {invalid_elastic} samples because the density or Vp/Vs pair "
-                    "does not support positive elastic moduli. Modulus-, strength-, and stress-dependent values "
+                    "does not support positive elastic moduli (including out-of-domain empirical Vs estimates). "
+                    "Modulus-, strength-, and stress-dependent values "
                     "are masked at those samples; inspect the logs before use."
+                )
+        if "Stress_Regime_QC_Flag" in results_df.columns:
+            stress_qc_failed = int(results_df["Stress_Regime_QC_Flag"].fillna(1).sum())
+            if stress_qc_failed:
+                st.warning(
+                    f"Stress-regime QC failed at {stress_qc_failed} samples for the selected {stress_regime_label} assumption. "
+                    "Raw calculated stresses remain available for diagnosis, but Shmin/SHmax and dependent failure/mud-window "
+                    "outputs are withheld at those samples. Review Stress_Regime_QC_Reason and validate the regime against field data."
                 )
         active_well_name = uploaded_file.name
         compute_params_used = compute_params
@@ -414,11 +450,20 @@ elif uploaded_file is not None:
                     f"{calib_info['uncalibrated_shmin_mpa']:.1f} MPa."
                 )
             else:
+                if calib_info.get("attainable_range_exists", True):
+                    range_message = (
+                        f"The modeled Shmin range under {stress_regime_label} is "
+                        f"{calib_info['achievable_min_mpa']:.1f}–{calib_info['achievable_max_mpa']:.1f} MPa. "
+                    )
+                else:
+                    range_message = (
+                        f"No Shmin value satisfies the selected {stress_regime_label} ordering and screening floor "
+                        "at this sample. "
+                    )
                 st.warning(
-                    f"⚠️ LOT/FIT calibration was not applied. At the matched log sample ({matched_depth_display:.1f} {depth_unit}; "
-                    f"requested {requested_depth_display:.1f} {depth_unit}), the modeled Shmin range is "
-                    f"{calib_info['achievable_min_mpa']:.1f}–{calib_info['achievable_max_mpa']:.1f} MPa. "
-                    "The original tectonic strain was retained."
+                    f"⚠️ LOT/FIT calibration was not applied at the matched log sample ({matched_depth_display:.1f} {depth_unit}; "
+                    f"requested {requested_depth_display:.1f} {depth_unit}). "
+                    f"{range_message}The original tectonic strain was retained."
                 )
 
     except BackendError as e:
@@ -432,14 +477,21 @@ if results_df is not None:
     depth_label = f"Depth ({depth_unit})"
     try:
         c1, c2, c3, c4, c5 = st.columns(5)
+
+        def qc_safe_mean(column, unit, decimals=1):
+            if column not in results_df:
+                return "N/A"
+            values = pd.to_numeric(results_df[column], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+            return f"{values.mean():.{decimals}f} {unit}" if not values.empty else "N/A (QC)"
+
         c1.metric("Depth Interval", f"{display_depth.min():.0f} - {display_depth.max():.0f} {depth_unit}")
-        c2.metric("Mean Sv", f"{results_df['Overburden_Stress_Sv_MPa'].mean():.1f} MPa" if "Overburden_Stress_Sv_MPa" in results_df else "N/A")
-        c3.metric("Mean Pore Press", f"{results_df['Pore_Pressure_Pp_MPa'].mean():.1f} MPa" if "Pore_Pressure_Pp_MPa" in results_df else "N/A")
+        c2.metric("Mean Sv", qc_safe_mean("Overburden_Stress_Sv_MPa", "MPa"))
+        c3.metric("Mean Pore Press", qc_safe_mean("Pore_Pressure_Pp_MPa", "MPa"))
         
         # Display Deviated collapse MW if available, else standard collapse MW
         disp_col_mw = "Deviated_Collapse_EMW_SG" if ("Deviated_Collapse_EMW_SG" in results_df and well_inclination > 0) else "Collapse_EMW_SG"
-        c4.metric(f"Min MW ({well_inclination:.0f}° Incl)", f"{results_df[disp_col_mw].mean():.2f} SG" if disp_col_mw in results_df else "N/A")
-        c5.metric("Mean Shmin Screen", f"{results_df['Shmin_EMW_SG'].mean():.2f} SG" if "Shmin_EMW_SG" in results_df else "N/A")
+        c4.metric(f"Min MW ({well_inclination:.0f}° Incl)", qc_safe_mean(disp_col_mw, "SG", decimals=2))
+        c5.metric("Mean Shmin Screen", qc_safe_mean("Shmin_EMW_SG", "SG", decimals=2))
 
         # Tab Structure
         tab1, tab2, tab3 = st.tabs([
