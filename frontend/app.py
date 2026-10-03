@@ -702,7 +702,14 @@ if results_df is not None:
                 except Exception as exc:
                     st.error(f"Failed to communicate with calculation service: {exc}")
 
-            if dev_result is not None:
+            if dev_result is not None and not dev_result.get("solution_found", True):
+                max_tested = float(dev_result["max_tested_mud_weight_sg"])
+                st.error(
+                    "No safe mud weight was found in the tested range. "
+                    f"The highest tested value was {max_tested:.2f} SG; it must not be treated as safe. "
+                    "Review the inputs or widen the search range."
+                )
+            elif dev_result is not None:
                 collapse_emw = float(dev_result["collapse_emw_sg"])
                 thetas_deg = np.degrees(np.array(dev_result["theta_rad"]))
                 sigma_tt = np.array(dev_result["sigma_tt_eff"])

@@ -241,7 +241,12 @@ def deviated_stability(payload: DeviatedStabilityRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"Deviated stability computation failed: {exc}")
 
     return {
-        "collapse_emw_sg": float(out["collapse_emw_sg"]),
+        "collapse_emw_sg": (
+            float(out["collapse_emw_sg"]) if out["collapse_emw_sg"] is not None else None
+        ),
+        "solution_found": bool(out["solution_found"]),
+        "status": out["status"],
+        "max_tested_mud_weight_sg": float(out["max_tested_mud_weight_sg"]),
         "biot_alpha_used": float(out["biot_alpha_used"]),
         "theta_rad": np.asarray(out["theta_rad"], dtype=float).tolist(),
         "sigma_tt_eff": np.asarray(out["sigma_tt_eff"], dtype=float).tolist(),
