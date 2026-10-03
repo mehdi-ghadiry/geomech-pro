@@ -551,12 +551,31 @@ class GeomechanicsCore:
         R = self._wellbore_rotation_matrix(well_inclination_deg, well_azimuth_deg)
         sigma_well = self._rotate_tensor(R, sigma_enu)
 
+        mw_min = float(mud_weight_sg_min)
+        mw_max = float(mud_weight_sg_max)
+        mw_step = float(mud_weight_sg_step)
+        if (
+            not np.isfinite([mw_min, mw_max, mw_step]).all()
+            or mw_min < 0.0
+            or mw_max < mw_min
+            or mw_step <= 0.0
+            or int(n_theta) < 4
+        ):
+            raise ValueError(
+                "Mud-weight range must be finite with 0 <= min <= max, step > 0, "
+                "and at least four angular samples."
+            )
+
         theta = np.linspace(0.0, 2.0 * np.pi, int(n_theta), dtype=float)
-        mws = np.arange(mud_weight_sg_min, mud_weight_sg_max + 0.5 * mud_weight_sg_step, mud_weight_sg_step)
+        mws = np.arange(mw_min, mw_max + 0.5 * mw_step, mw_step, dtype=float)
+        mws = mws[mws <= mw_max + 1e-12]
+        if mws.size == 0:
+            raise ValueError("The selected mud-weight range contains no test values.")
+
         depth_use = max(float(row["Depth"]), 1.0)
         mpam_per_m = 9.80665e-3
 
-        collapse_mw = float(mud_weight_sg_max)
+        collapse_mw = None
         nu = float(row.get("Poisson_Ratio", 0.25))
         pp = float(row["Pore_Pressure_Pp_MPa"])
         ucs = float(row.get("UCS_MPa", 20.0))
@@ -575,16 +594,16 @@ class GeomechanicsCore:
                 collapse_mw = float(mw)
                 break
 
-        # Calculate final state with the determined collapse mud weight
-        final_pw = collapse_mw * mpam_per_m * depth_use
-        final_kir = self._kirsch_wall_stresses(sigma_well, pp, final_pw, nu, alpha, theta)
-
-        # Calculate final state with the determined collapse mud weight
-        final_pw = collapse_mw * mpam_per_m * depth_use
+        solution_found = collapse_mw is not None
+        diagnostic_mw = collapse_mw if solution_found else float(mws[-1])
+        final_pw = diagnostic_mw * mpam_per_m * depth_use
         final_kir = self._kirsch_wall_stresses(sigma_well, pp, final_pw, nu, alpha, theta)
 
         return {
-            "collapse_emw_sg": float(collapse_mw),
+            "collapse_emw_sg": float(collapse_mw) if solution_found else None,
+            "solution_found": bool(solution_found),
+            "status": "safe_weight_found" if solution_found else "no_safe_weight_in_tested_range",
+            "max_tested_mud_weight_sg": float(mws[-1]),
             "biot_alpha_used": float(alpha),
             "theta_rad": theta.tolist() if hasattr(theta, "tolist") else list(theta),
             "sigma_tt_eff": final_kir["sigma_tt_eff"].tolist() if hasattr(final_kir["sigma_tt_eff"], "tolist") else list(final_kir["sigma_tt_eff"]),
