@@ -279,6 +279,40 @@ elif uploaded_file is not None:
         sel_rhob = st.sidebar.selectbox("Bulk Density (RHOB)", columns, index=columns.index(rhob_col) if rhob_col in columns else 0)
 
         dts_actual = None if sel_dts == "None" else sel_dts
+        if dts_actual is None:
+            vs_lithology_label = st.sidebar.selectbox(
+                "Lithology group (only if DTS is missing)",
+                [
+                    "Not specified / mixed — measured DTS required",
+                    "Water-saturated clastic shale/sandstone — Castagna estimate",
+                    "Carbonate / other — measured DTS or local calibration required",
+                ],
+                index=0,
+                help=(
+                    "Castagna's mudrock line is an empirical relation for water-saturated clastic "
+                    "silicate rocks, not carbonates. Do not select it for carbonate intervals."
+                ),
+            )
+            lithology_group = (
+                "water_saturated_clastic"
+                if vs_lithology_label.startswith("Water-saturated clastic")
+                else "carbonate" if vs_lithology_label.startswith("Carbonate")
+                else "unspecified"
+            )
+            if lithology_group == "water_saturated_clastic":
+                st.warning(
+                    "Using the empirical Castagna mudrock line for the selected water-saturated "
+                    "clastic interval only. Its result is an estimate, not a measured DTS log."
+                )
+            else:
+                st.info(
+                    "Without measured DTS, calculations require an explicitly selected water-saturated "
+                    "clastic interval. For carbonate or mixed/unknown lithology, provide measured DTS "
+                    "or a formation-calibrated Vp–Vs relation."
+                )
+                st.stop()
+        else:
+            lithology_group = "measured_dts"
 
         if depth_reference != "TVD":
             if depth_reference == "MD":
@@ -306,6 +340,7 @@ elif uploaded_file is not None:
             "dt_col": sel_dt,
             "rhob_col": sel_rhob,
             "dts_col": dts_actual or "",
+            "lithology_group": lithology_group,
             "biot_alpha": biot_alpha,
             "dt_matrix": dt_normal,
             "dt_surface": dt_surface,

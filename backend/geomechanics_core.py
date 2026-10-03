@@ -195,6 +195,19 @@ class GeomechanicsCore:
             - alpha * np.asarray(pp_mpa)
         )
 
+    @staticmethod
+    def _castagna_clastic_dts_us_ft(dt_us_ft):
+        """Return DTS from the Castagna mudrock line for explicitly selected water-saturated clastics.
+
+        Castagna et al. give Vs(km/s) = 0.8621*Vp(km/s) - 1.1724.
+        In ft/s the intercept is 1.1724*3280.84 = 3846.46 ft/s (rounded here).
+        This empirical relation is not a carbonate model and is not auto-selected.
+        """
+        dt_us_ft = np.asarray(dt_us_ft, dtype=float)
+        vp_ft_s = 1e6 / np.where(dt_us_ft > 0.0, dt_us_ft, np.nan)
+        vs_ft_s = np.maximum(0.8621 * vp_ft_s - 3846.4, 100.0)
+        return 1e6 / vs_ft_s
+
     # ---------- 1D MEM Engine ----------
     def compute_1d_mem(
         self,
@@ -203,6 +216,7 @@ class GeomechanicsCore:
         dt_col,
         rhob_col,
         dts_col=None,
+        lithology_group="unspecified",
         depth_reference=None,
         depth_unit="m",
         biot_alpha=1.0,
@@ -293,24 +307,30 @@ class GeomechanicsCore:
         rhob = s_rhob.values
         dt = s_dt.values
 
-        # --- Shear sonic (or Castagna estimation) ---
+        # --- Shear sonic: use measured DTS, or an explicitly selected clastic-only estimate ---
         if dts_col is not None:
             dts = pd.to_numeric(df[dts_col], errors="coerce").values.copy()
             if sonic_unit == "us/m":
                 dts = dts / 3.28084
             dts = np.where((dts < 35.0) | (dts > 500.0), np.nan, dts)
             dts = pd.Series(dts).interpolate(method="linear", limit=5).bfill().ffill().values
+            vs_estimation_method = "Measured DTS"
         else:
-            dts = None
-
-        def castagna_dts(dt_v):
-            vp_ft_s = 1e6 / np.where(dt_v > 0, dt_v, np.nan)
-            vs_ft_s = 0.8621 * vp_ft_s - 1172.4
-            vs_ft_s = np.maximum(vs_ft_s, 100.0)
-            return 1e6 / vs_ft_s
-
-        if dts is None:
-            dts = castagna_dts(dt)
+            lithology_group = str(lithology_group or "unspecified").strip().lower()
+            if lithology_group != "water_saturated_clastic":
+                if lithology_group == "carbonate":
+                    raise ValueError(
+                        "Castagna's mudrock line is not a carbonate relation. Supply measured DTS "
+                        "or a locally calibrated carbonate Vp-Vs model."
+                    )
+                raise ValueError(
+                    "Measured DTS is required unless the user explicitly identifies the interval "
+                    "as water-saturated clastic shale/sandstone for the Castagna estimate. "
+                    "No universal carbonate fallback is applied."
+                )
+            dts = self._castagna_clastic_dts_us_ft(dt)
+            vs_estimation_method = "Castagna mudrock line (water-saturated clastic only)"
+        out["Vs_Estimation_Method"] = vs_estimation_method
 
         # --- Dynamic Elastic Moduli (GPa) ---
         rho_kg = rhob * 1000.0
