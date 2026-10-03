@@ -58,6 +58,34 @@ class ShearVelocityEstimationTests(unittest.TestCase):
         )
         self.assertEqual(result["Vs_Estimation_Method"].iloc[0], "Measured DTS")
 
+    def test_limestone_estimator_uses_user_formula_and_unit_conversion(self):
+        dt = np.array([100.0])  # us/ft
+        vp_kms = 304.8 / dt
+        vs_kms = -0.05508 * vp_kms**2 + 1.01677 * vp_kms - 1.03049
+        dts, method = self.core._carbonate_empirical_dts_us_ft(dt, "limestone")
+        self.assertAlmostEqual(float(dts[0]), float(304.8 / vs_kms[0]), places=9)
+        self.assertIn("limestone", method)
+
+    def test_dolomite_estimator_uses_user_formula_and_unit_conversion(self):
+        dt = np.array([100.0])  # us/ft
+        vp_kms = 304.8 / dt
+        vs_kms = 0.58321 * vp_kms - 0.07775
+        dts, method = self.core._carbonate_empirical_dts_us_ft(dt, "dolomite")
+        self.assertAlmostEqual(float(dts[0]), float(304.8 / vs_kms[0]), places=9)
+        self.assertIn("dolomite", method)
+
+    def test_mixed_carbonate_cannot_select_single_lithology_fit(self):
+        with self.assertRaisesRegex(ValueError, "explicit limestone or dolomite"):
+            self.core.compute_1d_mem(
+                self.logs, "TVD", "DT", "RHOB", depth_reference="TVD",
+                lithology_group="carbonate", **self.trend
+            )
+
+    def test_carbonate_fit_masks_nonphysical_rows_without_clamping(self):
+        dts, _ = self.core._carbonate_empirical_dts_us_ft(np.array([500.0, 100.0]), "limestone")
+        self.assertTrue(np.isnan(dts[0]))
+        self.assertTrue(np.isfinite(dts[1]))
+
 
 if __name__ == "__main__":
     unittest.main()

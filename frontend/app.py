@@ -284,31 +284,41 @@ elif uploaded_file is not None:
                 "Lithology group (only if DTS is missing)",
                 [
                     "Not specified / mixed — measured DTS required",
-                    "Water-saturated clastic shale/sandstone — Castagna estimate",
-                    "Carbonate / other — measured DTS or local calibration required",
+                    "Water-saturated clastic shale/sandstone — Castagna mudrock-line estimate",
+                    "Limestone — empirical limestone Vp–Vs estimate",
+                    "Dolomite — empirical dolomite Vp–Vs estimate",
+                    "Mixed/other carbonate — measured DTS or local calibration required",
                 ],
                 index=0,
                 help=(
-                    "Castagna's mudrock line is an empirical relation for water-saturated clastic "
-                    "silicate rocks, not carbonates. Do not select it for carbonate intervals."
+                    "The clastic, limestone, and dolomite relations are separate empirical fits. "
+                    "They are estimates, not substitutes for measured DTS or formation calibration. "
+                    "Select one lithology only when it represents the full analyzed interval."
                 ),
             )
-            lithology_group = (
-                "water_saturated_clastic"
-                if vs_lithology_label.startswith("Water-saturated clastic")
-                else "carbonate" if vs_lithology_label.startswith("Carbonate")
-                else "unspecified"
+            lithology_options = {
+                "Water-saturated clastic": "water_saturated_clastic",
+                "Limestone": "limestone",
+                "Dolomite": "dolomite",
+                "Mixed/other carbonate": "carbonate",
+            }
+            lithology_group = next(
+                (value for label, value in lithology_options.items() if vs_lithology_label.startswith(label)),
+                "unspecified",
             )
             if lithology_group == "water_saturated_clastic":
                 st.warning(
                     "Using the empirical Castagna mudrock line for the selected water-saturated "
-                    "clastic interval only. Its result is an estimate, not a measured DTS log."
+                    "clastic interval. This is an estimate, not measured DTS."
+                )
+            elif lithology_group in {"limestone", "dolomite"}:
+                st.warning(
+                    f"Using an empirical {lithology_group} Vp–Vs relation. It is not locally calibrated; "
+                    "inspect the estimated DTS/Vs and use measured DTS or a local fit when available."
                 )
             else:
                 st.info(
-                    "Without measured DTS, calculations require an explicitly selected water-saturated "
-                    "clastic interval. For carbonate or mixed/unknown lithology, provide measured DTS "
-                    "or a formation-calibrated Vp–Vs relation."
+                    "For mixed/unknown lithology, provide measured DTS or a locally calibrated Vp–Vs relation."
                 )
                 st.stop()
         else:
