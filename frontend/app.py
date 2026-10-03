@@ -312,12 +312,14 @@ elif uploaded_file is not None:
         lower_hits = int(results_df.get("Pore_Pressure_Lower_Bound_Hit", pd.Series(0, index=results_df.index)).fillna(0).sum())
         upper_hits = int(results_df.get("Pore_Pressure_Upper_Bound_Hit", pd.Series(0, index=results_df.index)).fillna(0).sum())
         invalid_pp = int((1 - results_df.get("Pore_Pressure_Estimate_Valid", pd.Series(0, index=results_df.index)).fillna(0)).sum())
-        if lower_hits or upper_hits or invalid_pp:
+        unusable_pp = int((1 - results_df.get("Pore_Pressure_Estimate_Usable", pd.Series(0, index=results_df.index)).fillna(0)).sum())
+        if lower_hits or upper_hits or invalid_pp or unusable_pp:
             st.warning(
-                f"Unclipped Eaton pressure estimate is outside the reference bounds at {lower_hits} "
-                f"shallow-bound, {upper_hits} upper-bound, and {invalid_pp} invalid samples. "
-                "Pressure-derived stresses and mud-weight results at flagged depths are screening outputs only; "
-                "calibrate against field measurements before operational use."
+                f"Eaton pressure QC flagged {lower_hits} lower-bound, {upper_hits} upper-bound, "
+                f"{invalid_pp} non-finite, and {unusable_pp} unusable samples. The raw Eaton estimate "
+                "is retained for diagnosis; pore pressure and dependent stress/mud-window outputs are "
+                "withheld at flagged depths. Calibrate the sonic trend against well-specific measurements "
+                "before recomputing or using engineering results."
             )
         active_well_name = uploaded_file.name
         compute_params_used = compute_params
@@ -348,16 +350,25 @@ elif uploaded_file is not None:
 if results_df is not None:
     display_depth = depth_from_meters(results_df["Depth"], depth_unit)
     depth_label = f"Depth ({depth_unit})"
+
+    def mean_metric(column, decimals, unit):
+        if column not in results_df:
+            return "N/A"
+        values = pd.to_numeric(results_df[column], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        if values.empty:
+            return "N/A (QC)"
+        return f"{values.mean():.{decimals}f} {unit}"
+
     try:
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Depth Interval", f"{display_depth.min():.0f} - {display_depth.max():.0f} {depth_unit}")
-        c2.metric("Mean Sv", f"{results_df['Overburden_Stress_Sv_MPa'].mean():.1f} MPa" if "Overburden_Stress_Sv_MPa" in results_df else "N/A")
-        c3.metric("Mean Pore Press", f"{results_df['Pore_Pressure_Pp_MPa'].mean():.1f} MPa" if "Pore_Pressure_Pp_MPa" in results_df else "N/A")
+        c2.metric("Mean Sv", mean_metric("Overburden_Stress_Sv_MPa", 1, "MPa"))
+        c3.metric("Mean Pore Press", mean_metric("Pore_Pressure_Pp_MPa", 1, "MPa"))
         
         # Display Deviated collapse MW if available, else standard collapse MW
         disp_col_mw = "Deviated_Collapse_EMW_SG" if ("Deviated_Collapse_EMW_SG" in results_df and well_inclination > 0) else "Collapse_EMW_SG"
-        c4.metric(f"Min MW ({well_inclination:.0f}° Incl)", f"{results_df[disp_col_mw].mean():.2f} SG" if disp_col_mw in results_df else "N/A")
-        c5.metric("Safe Frac Margin", f"{results_df['Shmin_EMW_SG'].mean():.2f} SG" if "Shmin_EMW_SG" in results_df else "N/A")
+        c4.metric(f"Min MW ({well_inclination:.0f}° Incl)", mean_metric(disp_col_mw, 2, "SG"))
+        c5.metric("Safe Frac Margin", mean_metric("Shmin_EMW_SG", 2, "SG"))
 
         # Tab Structure
         tab1, tab2, tab3 = st.tabs([
@@ -470,171 +481,185 @@ if results_df is not None:
             # Locate nearest row using the displayed depth values.
             nearest_idx = (display_depth - target_depth_display).abs().idxmin()
             row_data = results_df.loc[nearest_idx]
+            usable_value = row_data.get("Pore_Pressure_Estimate_Usable", 0)
+            pp_value = row_data.get("Pore_Pressure_Pp_MPa", np.nan)
+            pressure_usable = (
+                pd.notna(usable_value)
+                and bool(usable_value)
+                and pd.notna(pp_value)
+                and np.isfinite(float(pp_value))
+            )
+            if not pressure_usable:
+                st.warning(
+                    "2D stability simulation is unavailable at this depth because the Eaton pore-pressure "
+                    "estimate failed QC. The raw estimate is retained for diagnosis; calibrate the sonic "
+                    "trend and recompute before using pressure-derived results."
+                )
+            else:
+                def get_val(key_list, default_val):
+                    for k in key_list:
+                        if k in row_data.index:
+                            val = row_data[k]
+                            if not pd.isna(val) and not np.isinf(val):
+                                return float(val)
+                    return float(default_val)
 
-            def get_val(key_list, default_val):
-                for k in key_list:
-                    if k in row_data.index:
-                        val = row_data[k]
-                        if not pd.isna(val) and not np.isinf(val):
-                            return float(val)
-                return float(default_val)
+                rec_collapse = get_val(["Deviated_Collapse_EMW_SG", "Collapse_EMW_SG"], 1.15)
+                rec_frac = get_val(["Fracture_EMW_SG", "Shmin_EMW_SG"], 1.85)
 
-            rec_collapse = get_val(["Deviated_Collapse_EMW_SG", "Collapse_EMW_SG"], 1.15)
-            rec_frac = get_val(["Fracture_EMW_SG", "Shmin_EMW_SG"], 1.85)
+                with col_mud:
+                    sim_mud_sg = st.slider(
+                        "Test Drilling Mud Weight (SG)",
+                        0.80,
+                        2.50,
+                        float(np.clip(rec_collapse + 0.05, 0.90, 2.30)),
+                        0.02,
+                    )
 
-            with col_mud:
-                sim_mud_sg = st.slider(
-                    "Test Drilling Mud Weight (SG)",
-                    0.80,
-                    2.50,
-                    float(np.clip(rec_collapse + 0.05, 0.90, 2.30)),
-                    0.02,
+                with col_r:
+                    well_dia_inch = st.selectbox("Wellbore Diameter (inches)", [6.0, 8.5, 12.25, 17.5], index=1)
+                    Rw = (well_dia_inch * 0.0254) / 2.0
+
+                # Extract Formation Parameters safely
+                sv = get_val(["Overburden_Stress_Sv_MPa", "Sv_MPa"], 50.0)
+                shmin = get_val(["Shmin_MPa"], 32.0)
+                shmax = get_val(["SHmax_MPa"], 42.0)
+                pp = get_val(["Pore_Pressure_Pp_MPa", "Pp_MPa"], 22.0)
+                row_biot_alpha = get_val(["Biot_Coefficient"], biot_alpha)
+                ucs = get_val(["UCS_MPa"], 45.0)
+                friction_ang = get_val(["Friction_Angle_deg", "Phi_deg", "Internal_Friction_deg"], 30.0)
+
+                # Mud pressure calculation: Pw (MPa)
+                pw = (sim_mud_sg * 1000.0) * 9.80665 * target_depth_m / 1e6
+
+                # Diagnostic Status
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Local UCS", f"{ucs:.1f} MPa")
+                m2.metric("Pore Pressure (Pp)", f"{pp:.1f} MPa")
+                m3.metric("Current Mud Press (Pw)", f"{pw:.1f} MPa")
+
+                if sim_mud_sg < rec_collapse:
+                    stability_status = "⚠️ Shear Breakout (MW Too Low)"
+                elif sim_mud_sg > rec_frac:
+                    stability_status = "💥 Tensile Fracture (MW Too High)"
+                else:
+                    stability_status = "✅ Borehole Stable"
+                m4.metric("Stability State", stability_status)
+
+                # Cartesian Grid Formulation for Kirsch Solution
+                max_r = Rw * 3.0
+                grid_points = 80
+                x_axis = np.linspace(-max_r, max_r, grid_points)
+                y_axis = np.linspace(-max_r, max_r, grid_points)
+                X, Y = np.meshgrid(x_axis, y_axis)
+                R = np.sqrt(X**2 + Y**2)
+                THETA = np.arctan2(Y, X)
+
+                mask_hole = R < Rw
+                safe_R = np.where(mask_hole, Rw, R)
+                eta = (Rw / safe_R) ** 2
+
+                s_mean = (shmax + shmin) / 2.0
+                s_diff = (shmax - shmin) / 2.0
+
+                # Kirsch Equations
+                sig_r = s_mean * (1.0 - eta) + s_diff * (1.0 - 4.0 * eta + 3.0 * (eta**2)) * np.cos(2.0 * THETA) + pw * eta
+                sig_th = s_mean * (1.0 + eta) - s_diff * (1.0 + 3.0 * (eta**2)) * np.cos(2.0 * THETA) - pw * eta
+                tau_rth = -s_diff * (1.0 + 2.0 * eta - 3.0 * (eta**2)) * np.sin(2.0 * THETA)
+
+                # Effective Stresses
+                sig_r_eff = sig_r - row_biot_alpha * pp
+                sig_th_eff = sig_th - row_biot_alpha * pp
+
+                # Principal In-Plane Stresses
+                c_stress = (sig_r_eff + sig_th_eff) / 2.0
+                rad_diff = np.sqrt(((sig_r_eff - sig_th_eff) / 2.0) ** 2 + tau_rth**2)
+                sig1_eff = c_stress + rad_diff
+                sig3_eff = c_stress - rad_diff
+
+                # Mohr-Coulomb Failure Index
+                phi_rad = np.radians(friction_ang)
+                q_mc = np.tan(np.pi / 4.0 + phi_rad / 2.0) ** 2
+                mc_strength = q_mc * np.maximum(sig3_eff, 0.0) + ucs
+                mci = sig1_eff / np.maximum(mc_strength, 1e-4)
+
+                sig_th_eff[mask_hole] = np.nan
+                mci[mask_hole] = np.nan
+
+                # 2D Visuals
+                fig_sim = make_subplots(
+                    rows=1,
+                    cols=2,
+                    subplot_titles=(
+                        "Effective Hoop Stress σ'θ (MPa)",
+                        "Mohr-Coulomb Failure Index (MCI ≥ 1.0 = Failure)",
+                    ),
+                    horizontal_spacing=0.12,
                 )
 
-            with col_r:
-                well_dia_inch = st.selectbox("Wellbore Diameter (inches)", [6.0, 8.5, 12.25, 17.5], index=1)
-                Rw = (well_dia_inch * 0.0254) / 2.0
+                fig_sim.add_trace(
+                    go.Contour(
+                        z=sig_th_eff,
+                        x=x_axis,
+                        y=y_axis,
+                        colorscale="Viridis",
+                        contours=dict(showlines=False),
+                        colorbar=dict(title="σ'θ (MPa)", x=0.44),
+                    ),
+                    row=1,
+                    col=1,
+                )
 
-            # Extract Formation Parameters safely
-            sv = get_val(["Overburden_Stress_Sv_MPa", "Sv_MPa"], 50.0)
-            shmin = get_val(["Shmin_MPa"], 32.0)
-            shmax = get_val(["SHmax_MPa"], 42.0)
-            pp = get_val(["Pore_Pressure_Pp_MPa", "Pp_MPa"], 22.0)
-            row_biot_alpha = get_val(["Biot_Coefficient"], biot_alpha)
-            ucs = get_val(["UCS_MPa"], 45.0)
-            friction_ang = get_val(["Friction_Angle_deg", "Phi_deg", "Internal_Friction_deg"], 30.0)
+                circle_theta = np.linspace(0, 2 * np.pi, 100)
+                fig_sim.add_trace(
+                    go.Scatter(
+                        x=Rw * np.cos(circle_theta),
+                        y=Rw * np.sin(circle_theta),
+                        fill="toself",
+                        fillcolor="rgba(30, 30, 30, 0.9)",
+                        line=dict(color="#FFFFFF", width=2),
+                        name="Wellbore Wall",
+                    ),
+                    row=1,
+                    col=1,
+                )
 
-            # Mud pressure calculation: Pw (MPa)
-            pw = (sim_mud_sg * 1000.0) * 9.80665 * target_depth_m / 1e6
+                fig_sim.add_trace(
+                    go.Contour(
+                        z=mci,
+                        x=x_axis,
+                        y=y_axis,
+                        colorscale="Turbo",
+                        contours=dict(start=0.5, end=1.5, size=0.1, showlines=True),
+                        colorbar=dict(title="MCI", x=1.0),
+                    ),
+                    row=1,
+                    col=2,
+                )
 
-            # Diagnostic Status
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Local UCS", f"{ucs:.1f} MPa")
-            m2.metric("Pore Pressure (Pp)", f"{pp:.1f} MPa")
-            m3.metric("Current Mud Press (Pw)", f"{pw:.1f} MPa")
+                fig_sim.add_trace(
+                    go.Scatter(
+                        x=Rw * np.cos(circle_theta),
+                        y=Rw * np.sin(circle_theta),
+                        fill="toself",
+                        fillcolor="rgba(30, 30, 30, 0.9)",
+                        line=dict(color="#FFFFFF", width=2),
+                        showlegend=False,
+                    ),
+                    row=1,
+                    col=2,
+                )
 
-            if sim_mud_sg < rec_collapse:
-                stability_status = "⚠️ Shear Breakout (MW Too Low)"
-            elif sim_mud_sg > rec_frac:
-                stability_status = "💥 Tensile Fracture (MW Too High)"
-            else:
-                stability_status = "✅ Borehole Stable"
-            m4.metric("Stability State", stability_status)
+                fig_sim.update_layout(
+                    height=550,
+                    margin=dict(l=30, r=30, t=60, b=40),
+                )
+                fig_sim.update_xaxes(title_text="X (m) [SHmax Direction →]", scaleanchor="y", row=1, col=1)
+                fig_sim.update_yaxes(title_text="Y (m) [Shmin Direction ↑]", row=1, col=1)
+                fig_sim.update_xaxes(title_text="X (m) [SHmax Direction →]", scaleanchor="y", row=1, col=2)
+                fig_sim.update_yaxes(title_text="Y (m) [Shmin Direction ↑]", row=1, col=2)
 
-            # Cartesian Grid Formulation for Kirsch Solution
-            max_r = Rw * 3.0
-            grid_points = 80
-            x_axis = np.linspace(-max_r, max_r, grid_points)
-            y_axis = np.linspace(-max_r, max_r, grid_points)
-            X, Y = np.meshgrid(x_axis, y_axis)
-            R = np.sqrt(X**2 + Y**2)
-            THETA = np.arctan2(Y, X)
-
-            mask_hole = R < Rw
-            safe_R = np.where(mask_hole, Rw, R)
-            eta = (Rw / safe_R) ** 2
-
-            s_mean = (shmax + shmin) / 2.0
-            s_diff = (shmax - shmin) / 2.0
-
-            # Kirsch Equations
-            sig_r = s_mean * (1.0 - eta) + s_diff * (1.0 - 4.0 * eta + 3.0 * (eta**2)) * np.cos(2.0 * THETA) + pw * eta
-            sig_th = s_mean * (1.0 + eta) - s_diff * (1.0 + 3.0 * (eta**2)) * np.cos(2.0 * THETA) - pw * eta
-            tau_rth = -s_diff * (1.0 + 2.0 * eta - 3.0 * (eta**2)) * np.sin(2.0 * THETA)
-
-            # Effective Stresses
-            sig_r_eff = sig_r - row_biot_alpha * pp
-            sig_th_eff = sig_th - row_biot_alpha * pp
-
-            # Principal In-Plane Stresses
-            c_stress = (sig_r_eff + sig_th_eff) / 2.0
-            rad_diff = np.sqrt(((sig_r_eff - sig_th_eff) / 2.0) ** 2 + tau_rth**2)
-            sig1_eff = c_stress + rad_diff
-            sig3_eff = c_stress - rad_diff
-
-            # Mohr-Coulomb Failure Index
-            phi_rad = np.radians(friction_ang)
-            q_mc = np.tan(np.pi / 4.0 + phi_rad / 2.0) ** 2
-            mc_strength = q_mc * np.maximum(sig3_eff, 0.0) + ucs
-            mci = sig1_eff / np.maximum(mc_strength, 1e-4)
-
-            sig_th_eff[mask_hole] = np.nan
-            mci[mask_hole] = np.nan
-
-            # 2D Visuals
-            fig_sim = make_subplots(
-                rows=1,
-                cols=2,
-                subplot_titles=(
-                    "Effective Hoop Stress σ'θ (MPa)",
-                    "Mohr-Coulomb Failure Index (MCI ≥ 1.0 = Failure)",
-                ),
-                horizontal_spacing=0.12,
-            )
-
-            fig_sim.add_trace(
-                go.Contour(
-                    z=sig_th_eff,
-                    x=x_axis,
-                    y=y_axis,
-                    colorscale="Viridis",
-                    contours=dict(showlines=False),
-                    colorbar=dict(title="σ'θ (MPa)", x=0.44),
-                ),
-                row=1,
-                col=1,
-            )
-
-            circle_theta = np.linspace(0, 2 * np.pi, 100)
-            fig_sim.add_trace(
-                go.Scatter(
-                    x=Rw * np.cos(circle_theta),
-                    y=Rw * np.sin(circle_theta),
-                    fill="toself",
-                    fillcolor="rgba(30, 30, 30, 0.9)",
-                    line=dict(color="#FFFFFF", width=2),
-                    name="Wellbore Wall",
-                ),
-                row=1,
-                col=1,
-            )
-
-            fig_sim.add_trace(
-                go.Contour(
-                    z=mci,
-                    x=x_axis,
-                    y=y_axis,
-                    colorscale="Turbo",
-                    contours=dict(start=0.5, end=1.5, size=0.1, showlines=True),
-                    colorbar=dict(title="MCI", x=1.0),
-                ),
-                row=1,
-                col=2,
-            )
-
-            fig_sim.add_trace(
-                go.Scatter(
-                    x=Rw * np.cos(circle_theta),
-                    y=Rw * np.sin(circle_theta),
-                    fill="toself",
-                    fillcolor="rgba(30, 30, 30, 0.9)",
-                    line=dict(color="#FFFFFF", width=2),
-                    showlegend=False,
-                ),
-                row=1,
-                col=2,
-            )
-
-            fig_sim.update_layout(
-                height=550,
-                margin=dict(l=30, r=30, t=60, b=40),
-            )
-            fig_sim.update_xaxes(title_text="X (m) [SHmax Direction →]", scaleanchor="y", row=1, col=1)
-            fig_sim.update_yaxes(title_text="Y (m) [Shmin Direction ↑]", row=1, col=1)
-            fig_sim.update_xaxes(title_text="X (m) [SHmax Direction →]", scaleanchor="y", row=1, col=2)
-            fig_sim.update_yaxes(title_text="Y (m) [Shmin Direction ↑]", row=1, col=2)
-
-            st.plotly_chart(fig_sim, use_container_width=True)
+                st.plotly_chart(fig_sim, use_container_width=True)
 
         # ==========================================
         # TAB 3: Deviated & Horizontal Wellbore Stability
