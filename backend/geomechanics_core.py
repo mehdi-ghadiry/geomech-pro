@@ -242,6 +242,33 @@ class GeomechanicsCore:
             )
         return dts_us_ft, method
 
+    @staticmethod
+    def _interpolate_short_internal_gaps(values, max_gap=5):
+        """Linearly fill only bounded internal NaN runs no longer than max_gap.
+
+        Leading/trailing gaps and longer outages remain NaN so downstream
+        calculations can flag missing log support instead of inventing values.
+        """
+        raw = np.asarray(values, dtype=float)
+        result = pd.Series(raw).interpolate(method="linear").to_numpy(dtype=float).copy()
+
+        i = 0
+        while i < len(raw):
+            if not np.isnan(raw[i]):
+                i += 1
+                continue
+
+            start = i
+            while i < len(raw) and np.isnan(raw[i]):
+                i += 1
+            end = i
+            is_edge_gap = start == 0 or end == len(raw)
+            is_long_gap = (end - start) > max_gap
+            if is_edge_gap or is_long_gap:
+                result[start:end] = np.nan
+
+        return result
+
     # ---------- 1D MEM Engine ----------
     def compute_1d_mem(
         self,
@@ -335,11 +362,14 @@ class GeomechanicsCore:
         rhob = np.where((rhob < 1.0) | (rhob > 3.6), np.nan, rhob)
         dt = np.where((dt < 35.0) | (dt > 250.0), np.nan, dt)
 
-        # Interpolate small internal NaNs if available to preserve continuity
-        s_rhob = pd.Series(rhob).interpolate(method="linear", limit=5).bfill().ffill()
-        s_dt = pd.Series(dt).interpolate(method="linear", limit=5).bfill().ffill()
-        rhob = s_rhob.values
-        dt = s_dt.values
+        # Fill only short, fully bounded internal gaps. Keep edge gaps and
+        # longer outages missing so they cannot silently become synthetic logs.
+        rhob = self._interpolate_short_internal_gaps(rhob, max_gap=5)
+        dt = self._interpolate_short_internal_gaps(dt, max_gap=5)
+        if not np.isfinite(rhob).any():
+            raise ValueError("No valid RHOB values remain after unit conversion and quality screening.")
+        if not np.isfinite(dt).any():
+            raise ValueError("No valid DT values remain after unit conversion and quality screening.")
 
         # --- Shear sonic: measured DTS or explicitly selected lithology fit ---
         if dts_col is not None:
@@ -347,7 +377,7 @@ class GeomechanicsCore:
             if sonic_unit == "us/m":
                 dts = dts / 3.28084
             dts = np.where((dts < 35.0) | (dts > 500.0), np.nan, dts)
-            dts = pd.Series(dts).interpolate(method="linear", limit=5).bfill().ffill().values
+            dts = self._interpolate_short_internal_gaps(dts, max_gap=5)
             vs_estimation_method = "Measured DTS"
         else:
             lithology_group = str(lithology_group or "unspecified").strip().lower()
@@ -369,6 +399,8 @@ class GeomechanicsCore:
                     "water-saturated clastic, limestone, or dolomite for its empirical estimate. "
                     "Mixed/unknown lithology requires measured DTS or local calibration."
                 )
+        if not np.isfinite(dts).any():
+            raise ValueError("No valid DTS values remain after unit conversion and quality screening.")
         out["Vs_Estimation_Method"] = vs_estimation_method
 
         # --- Dynamic Elastic Moduli (GPa) ---
@@ -407,7 +439,7 @@ class GeomechanicsCore:
             dz = np.diff(depth_m[valid], prepend=depth_m[valid][0])
             sv_valid = surface_offset_mpa + np.cumsum(rho_si * 9.80665 * dz) / 1e6
             sv[valid] = sv_valid
-            sv[~valid] = np.interp(depth_m[~valid], depth_m[valid], sv_valid)
+            # Keep overburden stress missing at samples with no supported density.
         out["Overburden_Stress_Sv_MPa"] = sv
 
         # --- Hydrostatic Pressure Baseline ---
