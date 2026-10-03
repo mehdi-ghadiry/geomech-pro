@@ -144,6 +144,17 @@ with st.sidebar:
     )
 
     st.subheader("⚙️ Log Units & In-Situ Calibration")
+    depth_reference_label = st.selectbox(
+        "Selected depth curve represents",
+        ["Choose depth reference...", "TVD (true vertical depth)", "MD (measured depth)"],
+        index=0,
+        help="Pore-pressure and stress calculations require TVD. MD needs a measured well trajectory for conversion.",
+    )
+    depth_reference = {
+        "TVD (true vertical depth)": "TVD",
+        "MD (measured depth)": "MD",
+    }.get(depth_reference_label, "")
+    depth_unit = st.selectbox("Depth Unit", ["m", "ft"], index=0)
     sonic_unit = st.selectbox("Sonic Unit", ["us/ft", "us/m"], index=0)
     density_unit = st.selectbox("Density Unit", ["g/cm3", "kg/m3"], index=0)
 
@@ -249,17 +260,29 @@ elif uploaded_file is not None:
         rhob_col = find_default(["rhob", "den"], columns)
 
         st.sidebar.subheader("🎯 Curve Mapping")
-        sel_dept = st.sidebar.selectbox("Depth (MD/TVD)", columns, index=columns.index(dept_col) if dept_col in columns else 0)
+        sel_dept = st.sidebar.selectbox("Depth curve (select a TVD curve)", columns, index=columns.index(dept_col) if dept_col in columns else 0)
         sel_dt = st.sidebar.selectbox("Compressional Sonic (DT)", columns, index=columns.index(dt_col) if dt_col in columns else 0)
         sel_dts = st.sidebar.selectbox("Shear Sonic (DTS)", ["None"] + columns, index=(columns.index(dts_col) + 1) if dts_col in columns else 0)
         sel_rhob = st.sidebar.selectbox("Bulk Density (RHOB)", columns, index=columns.index(rhob_col) if rhob_col in columns else 0)
 
         dts_actual = None if sel_dts == "None" else sel_dts
 
+        if depth_reference != "TVD":
+            if depth_reference == "MD":
+                st.warning(
+                    "This version cannot convert MD to TVD without a measured well trajectory. "
+                    "Choose a TVD depth curve, or provide trajectory conversion support before computing pressures."
+                )
+            else:
+                st.info("Select whether the chosen depth curve is TVD or MD before computing.")
+            st.stop()
+
         # --- Step 2: send the file + column mapping + parameters to the
         #     backend and get the computed 1D MEM back as JSON ---
         compute_params = {
             "depth_col": sel_dept,
+            "depth_reference": depth_reference,
+            "depth_unit": depth_unit,
             "dt_col": sel_dt,
             "rhob_col": sel_rhob,
             "dts_col": dts_actual or "",
@@ -285,6 +308,16 @@ elif uploaded_file is not None:
 
         results_df = pd.DataFrame(compute_result["results"])
         results_df = results_df.apply(pd.to_numeric, errors="coerce")
+        lower_hits = int(results_df.get("Pore_Pressure_Lower_Bound_Hit", pd.Series(0, index=results_df.index)).fillna(0).sum())
+        upper_hits = int(results_df.get("Pore_Pressure_Upper_Bound_Hit", pd.Series(0, index=results_df.index)).fillna(0).sum())
+        invalid_pp = int((1 - results_df.get("Pore_Pressure_Estimate_Valid", pd.Series(0, index=results_df.index)).fillna(0)).sum())
+        if lower_hits or upper_hits or invalid_pp:
+            st.warning(
+                f"Unclipped Eaton pressure estimate is outside the reference bounds at {lower_hits} "
+                f"shallow-bound, {upper_hits} upper-bound, and {invalid_pp} invalid samples. "
+                "Pressure-derived stresses and mud-weight results at flagged depths are screening outputs only; "
+                "calibrate against field measurements before operational use."
+            )
         active_well_name = uploaded_file.name
         compute_params_used = compute_params
         data_source = "upload"

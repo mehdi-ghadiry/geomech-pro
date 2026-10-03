@@ -147,6 +147,8 @@ class GeomechanicsCore:
         dt_col,
         rhob_col,
         dts_col=None,
+        depth_reference=None,
+        depth_unit="m",
         biot_alpha=1.0,
         dt_matrix=55.5,
         dt_fluid=189.0,
@@ -162,12 +164,32 @@ class GeomechanicsCore:
         assumed_shallow_density=2.0,       # g/cm3
     ):
         """
-        Full 1D MEM computation with calibrated poroelastic horizontal stresses
-        and robust Eaton pore pressure lower-bounding.
+        Full 1D MEM computation. Depth must be explicitly identified as TVD.
+        Eaton pressure estimates are reported without silently clipping them.
         """
+        depth_reference = str(depth_reference or "").strip().upper()
+        if depth_reference != "TVD":
+            raise ValueError(
+                "This computation requires a TVD depth curve. MD cannot be used "
+                "without a measured well trajectory for conversion; select a TVD "
+                "curve or provide a valid trajectory conversion first."
+            )
+
+        depth_unit_key = str(depth_unit or "").strip().lower()
+        depth_factors = {"m": 1.0, "meter": 1.0, "meters": 1.0, "ft": 0.3048, "feet": 0.3048}
+        if depth_unit_key not in depth_factors:
+            raise ValueError("Depth unit must be explicitly selected as m or ft.")
+
         out = pd.DataFrame()
-        out["Depth"] = pd.to_numeric(df[depth_col], errors="coerce")
-        depth_m = out["Depth"].values
+        depth_values = pd.to_numeric(df[depth_col], errors="coerce").to_numpy(dtype=float)
+        depth_m = depth_values * depth_factors[depth_unit_key]
+        if not np.isfinite(depth_m).all():
+            raise ValueError("The selected TVD depth curve contains missing or non-finite values.")
+        if np.any(depth_m < 0.0):
+            raise ValueError("TVD depth values cannot be negative.")
+        if len(depth_m) > 1 and np.any(np.diff(depth_m) < 0.0):
+            raise ValueError("TVD depths must be ordered from shallow to deep before computation.")
+        out["Depth"] = depth_m
 
         # --- Unit normalization ---
         dt = pd.to_numeric(df[dt_col], errors="coerce").values.copy()
@@ -259,9 +281,21 @@ class GeomechanicsCore:
         ratio = np.maximum(dt_normal / np.maximum(dt, 1e-2), 0.1)
         pp_eaton = sv - (sv - p_hydro) * (ratio ** eaton_n)
 
-        # CRITICAL SAFEGUARD: Pp must strictly be between Hydrostatic and 0.95*Sv
-        pp = np.clip(pp_eaton, p_hydro, sv * 0.95)
+        # Do not silently clamp an Eaton estimate to assumed physical bounds.
+        # Report the raw estimate and expose where it falls outside the conventional
+        # hydrostatic-to-0.95*Sv screening interval so the user can calibrate it.
+        pp = pp_eaton.copy()
+        pp_valid = np.isfinite(pp_eaton) & np.isfinite(p_hydro) & np.isfinite(sv)
+        lower_bound_hit = pp_valid & (pp_eaton < p_hydro)
+        upper_bound_hit = pp_valid & (pp_eaton > (sv * 0.95))
         out["Pore_Pressure_Pp_MPa"] = pp
+        out["Pore_Pressure_Pp_Eaton_Raw_MPa"] = pp_eaton
+        out["Pore_Pressure_Hydrostatic_Reference_MPa"] = p_hydro
+        out["Pore_Pressure_0p95Sv_Reference_MPa"] = sv * 0.95
+        out["Pore_Pressure_Lower_Bound_Hit"] = lower_bound_hit.astype(int)
+        out["Pore_Pressure_Upper_Bound_Hit"] = upper_bound_hit.astype(int)
+        out["Pore_Pressure_Estimate_Valid"] = pp_valid.astype(int)
+        out["Pore_Pressure_QC_Flag"] = (~pp_valid | lower_bound_hit | upper_bound_hit).astype(int)
 
         # --- Effective Stresses & Poroelastic Horizontal Stresses ---
         e_pa = out["Youngs_Modulus_GPa"].values * 1e9
