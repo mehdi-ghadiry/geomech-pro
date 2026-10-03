@@ -410,17 +410,41 @@ class GeomechanicsCore:
         vp_m[vp_m <= 0] = np.nan
         vs_m[vs_m <= 0] = np.nan
 
-        mu_dyn = rho_kg * vs_m**2 / 1e9          # GPa (Shear)
-        lam = rho_kg * (vp_m**2 - 2.0 * vs_m**2) / 1e9
-        nu_dyn = lam / (2.0 * (lam + mu_dyn))
-        e_dyn = mu_dyn * (3.0 * lam + 2.0 * mu_dyn) / (lam + mu_dyn)
-        k_dyn = lam + (2.0 / 3.0) * mu_dyn
+        # Isotropic elastic moduli require positive density, shear modulus, and
+        # bulk modulus. In wave-speed form: rho > 0, Vs > 0, and
+        # Vp**2 > 4/3 * Vs**2. Mask invalid pairs before applying display/model
+        # bounds; clipping must not turn an unstable pair into plausible data.
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            mu_dyn = rho_kg * vs_m**2 / 1e9          # GPa (Shear)
+            lam = rho_kg * (vp_m**2 - 2.0 * vs_m**2) / 1e9
+            nu_dyn = lam / (2.0 * (lam + mu_dyn))
+            e_dyn = mu_dyn * (3.0 * lam + 2.0 * mu_dyn) / (lam + mu_dyn)
+            k_dyn = lam + (2.0 / 3.0) * mu_dyn
 
-        # Static correction
-        out["Youngs_Modulus_GPa"] = np.clip(0.7 * e_dyn, 0.5, 120.0)
-        out["Shear_Modulus_GPa"] = np.clip(0.7 * mu_dyn, 0.2, 50.0)
-        out["Bulk_Modulus_GPa"] = np.clip(0.7 * k_dyn, 0.5, 150.0)
-        out["Poisson_Ratio"] = np.clip(nu_dyn, 0.10, 0.45)
+        elastic_valid = (
+            np.isfinite(rho_kg) & (rho_kg > 0.0)
+            & np.isfinite(vp_m) & (vp_m > 0.0)
+            & np.isfinite(vs_m) & (vs_m > 0.0)
+            & np.isfinite(mu_dyn) & (mu_dyn > 0.0)
+            & np.isfinite(k_dyn) & (k_dyn > 0.0)
+            & np.isfinite(e_dyn) & (e_dyn > 0.0)
+        )
+        out["Elastic_Properties_Valid"] = elastic_valid.astype(int)
+        out["Elastic_Properties_QC_Flag"] = (~elastic_valid).astype(int)
+
+        # Static correction; invalid elastic rows remain missing, not clamped.
+        out["Youngs_Modulus_GPa"] = np.where(
+            elastic_valid, np.clip(0.7 * e_dyn, 0.5, 120.0), np.nan
+        )
+        out["Shear_Modulus_GPa"] = np.where(
+            elastic_valid, np.clip(0.7 * mu_dyn, 0.2, 50.0), np.nan
+        )
+        out["Bulk_Modulus_GPa"] = np.where(
+            elastic_valid, np.clip(0.7 * k_dyn, 0.5, 150.0), np.nan
+        )
+        out["Poisson_Ratio"] = np.where(
+            elastic_valid, np.clip(nu_dyn, 0.10, 0.45), np.nan
+        )
 
         # --- Rock Strength ---
         out["UCS_MPa"] = np.clip(0.77 * (out["Youngs_Modulus_GPa"].values * 1000.0) ** 0.91 / 100.0, 1.0, 350.0)

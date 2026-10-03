@@ -386,6 +386,16 @@ elif uploaded_file is not None:
                 "Invalid pressure values are excluded from the stress and mud-weight calculations; gaps in those outputs are intentional. "
                 "Recalibrate the normal sonic trend against normally compacted local shale and field measurements before operational use."
             )
+        if "Elastic_Properties_Valid" in results_df.columns:
+            invalid_elastic = int(
+                (1 - results_df["Elastic_Properties_Valid"].fillna(0)).sum()
+            )
+            if invalid_elastic:
+                st.warning(
+                    f"Elastic-property QC failed at {invalid_elastic} samples because the density or Vp/Vs pair "
+                    "does not support positive elastic moduli. Modulus-, strength-, and stress-dependent values "
+                    "are masked at those samples; inspect the logs before use."
+                )
         active_well_name = uploaded_file.name
         compute_params_used = compute_params
         data_source = "upload"
