@@ -279,6 +279,50 @@ elif uploaded_file is not None:
         sel_rhob = st.sidebar.selectbox("Bulk Density (RHOB)", columns, index=columns.index(rhob_col) if rhob_col in columns else 0)
 
         dts_actual = None if sel_dts == "None" else sel_dts
+        if dts_actual is None:
+            vs_lithology_label = st.sidebar.selectbox(
+                "Lithology group (only if DTS is missing)",
+                [
+                    "Not specified / mixed — measured DTS required",
+                    "Water-saturated clastic shale/sandstone — Castagna mudrock-line estimate",
+                    "Limestone — empirical limestone Vp–Vs estimate",
+                    "Dolomite — empirical dolomite Vp–Vs estimate",
+                    "Mixed/other carbonate — measured DTS or local calibration required",
+                ],
+                index=0,
+                help=(
+                    "The clastic, limestone, and dolomite relations are separate empirical fits. "
+                    "They are estimates, not substitutes for measured DTS or formation calibration. "
+                    "Select one lithology only when it represents the full analyzed interval."
+                ),
+            )
+            lithology_options = {
+                "Water-saturated clastic": "water_saturated_clastic",
+                "Limestone": "limestone",
+                "Dolomite": "dolomite",
+                "Mixed/other carbonate": "carbonate",
+            }
+            lithology_group = next(
+                (value for label, value in lithology_options.items() if vs_lithology_label.startswith(label)),
+                "unspecified",
+            )
+            if lithology_group == "water_saturated_clastic":
+                st.warning(
+                    "Using the empirical Castagna mudrock line for the selected water-saturated "
+                    "clastic interval. This is an estimate, not measured DTS."
+                )
+            elif lithology_group in {"limestone", "dolomite"}:
+                st.warning(
+                    f"Using an empirical {lithology_group} Vp–Vs relation. It is not locally calibrated; "
+                    "inspect the estimated DTS/Vs and use measured DTS or a local fit when available."
+                )
+            else:
+                st.info(
+                    "For mixed/unknown lithology, provide measured DTS or a locally calibrated Vp–Vs relation."
+                )
+                st.stop()
+        else:
+            lithology_group = "measured_dts"
 
         if depth_reference != "TVD":
             if depth_reference == "MD":
@@ -306,6 +350,7 @@ elif uploaded_file is not None:
             "dt_col": sel_dt,
             "rhob_col": sel_rhob,
             "dts_col": dts_actual or "",
+            "lithology_group": lithology_group,
             "biot_alpha": biot_alpha,
             "dt_matrix": dt_normal,
             "dt_surface": dt_surface,

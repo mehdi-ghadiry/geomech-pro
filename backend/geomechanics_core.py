@@ -195,6 +195,53 @@ class GeomechanicsCore:
             - alpha * np.asarray(pp_mpa)
         )
 
+    @staticmethod
+    def _castagna_clastic_dts_us_ft(dt_us_ft):
+        """Estimate DTS using the Castagna mudrock line for selected wet clastics only."""
+        dt_us_ft = np.asarray(dt_us_ft, dtype=float)
+        vp_ft_s = 1e6 / np.where(dt_us_ft > 0.0, dt_us_ft, np.nan)
+        vs_ft_s = np.maximum(0.8621 * vp_ft_s - 3846.4, 100.0)
+        return 1e6 / vs_ft_s
+
+    @staticmethod
+    def _carbonate_empirical_dts_us_ft(dt_us_ft, carbonate_lithology):
+        """Estimate DTS from the selected limestone/dolomite Vp-Vs fit.
+
+        Input/output slowness is us/ft; the empirical equations use Vp and Vs
+        in km/s. Nonphysical results are masked rather than clipped into range.
+        These generic fits are estimates and require local QC/calibration.
+        """
+        dt_us_ft = np.asarray(dt_us_ft, dtype=float)
+        vp_km_s = 304.8 / np.where(dt_us_ft > 0.0, dt_us_ft, np.nan)
+        lithology = str(carbonate_lithology or "").strip().lower()
+        if lithology == "limestone":
+            vs_km_s = -0.05508 * vp_km_s**2 + 1.01677 * vp_km_s - 1.03049
+            method = "Empirical limestone Vp-Vs relation (uncalibrated)"
+        elif lithology == "dolomite":
+            vs_km_s = 0.58321 * vp_km_s - 0.07775
+            method = "Empirical dolomite Vp-Vs relation (uncalibrated)"
+        else:
+            raise ValueError(
+                "Carbonate estimation requires an explicit limestone or dolomite selection; "
+                "mixed/unknown carbonate requires measured DTS or local calibration."
+            )
+
+        valid = (
+            np.isfinite(vp_km_s)
+            & np.isfinite(vs_km_s)
+            & (vp_km_s > 0.0)
+            & (vs_km_s > 0.0)
+            & (vs_km_s < vp_km_s)
+        )
+        dts_us_ft = np.full(vp_km_s.shape, np.nan, dtype=float)
+        dts_us_ft[valid] = 304.8 / vs_km_s[valid]
+        if not valid.any():
+            raise ValueError(
+                f"The selected empirical {lithology} relation produced no physically valid Vs values. "
+                "Supply measured DTS or a locally calibrated Vp-Vs relation."
+            )
+        return dts_us_ft, method
+
     # ---------- 1D MEM Engine ----------
     def compute_1d_mem(
         self,
@@ -203,6 +250,7 @@ class GeomechanicsCore:
         dt_col,
         rhob_col,
         dts_col=None,
+        lithology_group="unspecified",
         depth_reference=None,
         depth_unit="m",
         biot_alpha=1.0,
@@ -293,24 +341,35 @@ class GeomechanicsCore:
         rhob = s_rhob.values
         dt = s_dt.values
 
-        # --- Shear sonic (or Castagna estimation) ---
+        # --- Shear sonic: measured DTS or explicitly selected lithology fit ---
         if dts_col is not None:
             dts = pd.to_numeric(df[dts_col], errors="coerce").values.copy()
             if sonic_unit == "us/m":
                 dts = dts / 3.28084
             dts = np.where((dts < 35.0) | (dts > 500.0), np.nan, dts)
             dts = pd.Series(dts).interpolate(method="linear", limit=5).bfill().ffill().values
+            vs_estimation_method = "Measured DTS"
         else:
-            dts = None
-
-        def castagna_dts(dt_v):
-            vp_ft_s = 1e6 / np.where(dt_v > 0, dt_v, np.nan)
-            vs_ft_s = 0.8621 * vp_ft_s - 1172.4
-            vs_ft_s = np.maximum(vs_ft_s, 100.0)
-            return 1e6 / vs_ft_s
-
-        if dts is None:
-            dts = castagna_dts(dt)
+            lithology_group = str(lithology_group or "unspecified").strip().lower()
+            if lithology_group == "water_saturated_clastic":
+                dts = self._castagna_clastic_dts_us_ft(dt)
+                vs_estimation_method = "Castagna mudrock line (water-saturated clastic only)"
+            elif lithology_group in {"limestone", "dolomite"}:
+                dts, vs_estimation_method = self._carbonate_empirical_dts_us_ft(
+                    dt, lithology_group
+                )
+            elif lithology_group == "carbonate":
+                raise ValueError(
+                    "Castagna's mudrock line is not a carbonate relation. Select explicit limestone or dolomite "
+                    "for the corresponding empirical fit; mixed/unknown carbonate requires measured DTS."
+                )
+            else:
+                raise ValueError(
+                    "Measured DTS is required unless the user explicitly identifies the interval as "
+                    "water-saturated clastic, limestone, or dolomite for its empirical estimate. "
+                    "Mixed/unknown lithology requires measured DTS or local calibration."
+                )
+        out["Vs_Estimation_Method"] = vs_estimation_method
 
         # --- Dynamic Elastic Moduli (GPa) ---
         rho_kg = rhob * 1000.0
