@@ -33,9 +33,10 @@ class LotFitCalibrationTests(unittest.TestCase):
         self.assertAlmostEqual(result["uncalibrated_shmin_mpa"], 34.0, places=6)
         self.assertTrue(result["calibration_applied"])
 
-    def test_maximum_uses_same_0p98_sv_bound_as_mem_output(self):
+    def test_normal_faulting_maximum_follows_regime_order_not_fraction_of_sv(self):
         result = self.core.solve_tectonic_ey_for_lot(self.results, 1010.0, 49.5)
-        self.assertEqual(result["achievable_max_mpa"], 49.0)
+        self.assertAlmostEqual(result["achievable_max_mpa"], 20.0)
+        self.assertTrue(result["attainable_range_exists"])
         self.assertFalse(result["within_range"])
         self.assertFalse(result["calibration_applied"])
 
@@ -54,6 +55,21 @@ class LotFitCalibrationTests(unittest.TestCase):
         invalid.loc[1, "Youngs_Modulus_GPa"] = np.nan
         with self.assertRaisesRegex(ValueError, "missing or non-finite"):
             self.core.solve_tectonic_ey_for_lot(invalid, 1010.0, 25.0)
+
+    def test_lot_attainability_uses_selected_stress_regime(self):
+        strike = self.core.solve_tectonic_ey_for_lot(
+            self.results, 1010.0, 40.0, tectonic_ex=0.003,
+            stress_regime="strike_slip",
+        )
+        self.assertTrue(strike["calibration_applied"])
+        self.assertEqual(strike["stress_regime"], "strike_slip")
+
+        reverse = self.core.solve_tectonic_ey_for_lot(
+            self.results, 1010.0, 60.0, tectonic_ex=0.003,
+            stress_regime="reverse_faulting",
+        )
+        self.assertTrue(reverse["calibration_applied"])
+        self.assertEqual(reverse["stress_regime"], "reverse_faulting")
 
     def test_out_of_range_target_is_not_reported_as_applied(self):
         result = self.core.solve_tectonic_ey_for_lot(self.results, 1010.0, 10.0)
