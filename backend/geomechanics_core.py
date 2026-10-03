@@ -168,6 +168,33 @@ class GeomechanicsCore:
         ) / (q_mc + 1.0)
         return np.maximum(pressure, pp_mpa)
 
+    @staticmethod
+    def _vertical_tensile_breakdown_pressure(
+        shmin_mpa,
+        shmax_mpa,
+        tensile_strength_mpa,
+        pp_mpa,
+        biot_alpha,
+    ):
+        """Screening onset pressure from the current vertical-well Kirsch model.
+
+        Compression is positive. At the minimum-hoop-stress azimuth, the current
+        effective-stress convention gives sigma_theta_eff = 3*Shmin - SHmax - Pw
+        - alpha*Pp. Setting this equal to -T0 yields the breakdown estimate.
+        Assumes a vertical, intact, isotropic elastic wellbore with uniform pore
+        pressure; thermal, leak-off, pre-existing-fracture, and poroelastic-flow
+        effects are not represented.
+        """
+        alpha = float(biot_alpha)
+        if not np.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
+            raise ValueError("Biot coefficient must be between 0 and 1.")
+        return (
+            3.0 * np.asarray(shmin_mpa)
+            - np.asarray(shmax_mpa)
+            + np.asarray(tensile_strength_mpa)
+            - alpha * np.asarray(pp_mpa)
+        )
+
     # ---------- 1D MEM Engine ----------
     def compute_1d_mem(
         self,
@@ -409,7 +436,13 @@ class GeomechanicsCore:
         # Shear Failure Collapse Pressure (Mohr-Coulomb around wellbore)
         shmin_v = out["Shmin_MPa"].values
         shmax_v = out["SHmax_MPa"].values
-        p_frac_upper = shmin_v  # Existing simplified losses threshold; not a tensile-failure calculation.
+        tensile_breakdown_pressure = self._vertical_tensile_breakdown_pressure(
+            shmin_v,
+            shmax_v,
+            out["Tensile_Strength_MPa"].values,
+            pp,
+            biot_alpha,
+        )
 
         pw_collapse = self._vertical_collapse_pressure(
             shmax_v,
@@ -419,9 +452,22 @@ class GeomechanicsCore:
             friction_angle,
             biot_alpha,
         )
-        out["Collapse_EMW_SG"] = np.clip(mw_sg(pw_collapse, depth_m), 0.8, 2.5)
+        out["Collapse_EMW_SG"] = mw_sg(pw_collapse, depth_m)
+        out["Tensile_Breakdown_Pressure_MPa"] = tensile_breakdown_pressure
+        out["Tensile_Breakdown_EMW_SG"] = mw_sg(tensile_breakdown_pressure, depth_m)
         out["Shmin_EMW_SG"] = mw_sg(shmin_v, depth_m)
-        out["Fracture_EMW_SG"] = np.clip(mw_sg(p_frac_upper, depth_m), out["Pore_Pressure_EMW_SG"] + 0.05, 3.0)
+        # Shmin is retained as a separate idealized fracture-opening/propagation screen.
+        # The operational upper screening curve is the more conservative of that limit
+        # and the intact-rock tensile-initiation estimate. Do not clip away no-window cases.
+        out["Fracture_EMW_SG"] = np.minimum(
+            out["Tensile_Breakdown_EMW_SG"], out["Shmin_EMW_SG"]
+        )
+        lower_screen = np.maximum(out["Pore_Pressure_EMW_SG"], out["Collapse_EMW_SG"])
+        out["Mud_Window_Exists"] = (
+            np.isfinite(lower_screen)
+            & np.isfinite(out["Fracture_EMW_SG"])
+            & (lower_screen <= out["Fracture_EMW_SG"])
+        )
 
         out.replace([np.inf, -np.inf], np.nan, inplace=True)
         return out
