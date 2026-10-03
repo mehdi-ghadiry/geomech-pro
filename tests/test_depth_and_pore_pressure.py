@@ -30,13 +30,42 @@ class DepthAndPorePressureTests(unittest.TestCase):
         self.assertAlmostEqual(result["Depth"].iloc[0], 304.8, places=6)
         self.assertAlmostEqual(result["Depth"].iloc[-1], 310.896, places=6)
 
-    def test_unbounded_eaton_estimate_is_reported_and_flagged(self):
+    def test_unbounded_eaton_estimate_is_reported_but_not_used_downstream(self):
         result = self.compute()
         hydrostatic = result["Depth"] * 9.80665e-3
-        self.assertTrue((result["Pore_Pressure_Pp_MPa"] < hydrostatic).all())
+        self.assertTrue((result["Pore_Pressure_Pp_Eaton_Raw_MPa"] < hydrostatic).all())
         self.assertTrue((result["Pore_Pressure_Lower_Bound_Hit"] == 1).all())
-        self.assertTrue((result["Pore_Pressure_Pp_MPa"] == result["Pore_Pressure_Pp_Eaton_Raw_MPa"]).all())
+        self.assertTrue(result["Pore_Pressure_Pp_MPa"].isna().all())
+        self.assertTrue((result["Pore_Pressure_Estimate_Valid"] == 1).all())
+        self.assertTrue((result["Pore_Pressure_Estimate_Usable"] == 0).all())
+        self.assertTrue((result["Pore_Pressure_QC_Flag"] == 1).all())
         self.assertTrue((result["Pore_Pressure_Hydrostatic_Reference_MPa"] == hydrostatic).all())
+        dependent = [
+            "Sig_V_Eff_MPa", "Shmin_MPa", "SHmax_MPa", "Pore_Pressure_EMW_SG",
+            "Collapse_EMW_SG", "Shmin_EMW_SG", "Fracture_EMW_SG",
+        ]
+        for column in dependent:
+            with self.subTest(column=column):
+                self.assertTrue(result[column].isna().all())
+
+    def test_in_range_estimate_remains_available_for_downstream_calculations(self):
+        self.logs["DT"] = [160.0, 160.0, 160.0]
+        result = self.compute()
+        self.assertTrue((result["Pore_Pressure_Estimate_Usable"] == 1).all())
+        self.assertTrue(result["Pore_Pressure_Pp_MPa"].notna().all())
+        self.assertTrue(result["Shmin_MPa"].notna().all())
+        self.assertTrue(result["Collapse_EMW_SG"].notna().all())
+
+    def test_deviated_analysis_rejects_flagged_pore_pressure(self):
+        result = self.compute()
+        with self.assertRaisesRegex(ValueError, "not usable"):
+            self.core.compute_deviated_wellbore_stability(
+                mem_df=result,
+                depth_m=float(result["Depth"].iloc[0]),
+                well_inclination_deg=60.0,
+                well_azimuth_deg=90.0,
+                shmax_azimuth_deg=0.0,
+            )
 
     def test_non_monotonic_tvd_is_rejected(self):
         self.logs.loc[1, "TVD"] = 990.0

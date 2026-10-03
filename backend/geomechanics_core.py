@@ -286,21 +286,26 @@ class GeomechanicsCore:
         ratio = np.maximum(dt_normal / np.maximum(dt, 1e-2), 0.1)
         pp_eaton = sv - (sv - p_hydro) * (ratio ** eaton_n)
 
-        # Do not silently clamp an Eaton estimate to assumed physical bounds.
-        # Report the raw estimate and expose where it falls outside the conventional
-        # hydrostatic-to-0.95*Sv screening interval so the user can calibrate it.
-        pp = pp_eaton.copy()
+        # Keep the unmodified Eaton value for diagnosis, but do not allow an
+        # estimate outside the conventional screening interval to drive stresses
+        # or mud-weight outputs. This is a safety/QC gate, not a replacement for
+        # field calibration; a flagged interval may need a well-specific trend.
         pp_valid = np.isfinite(pp_eaton) & np.isfinite(p_hydro) & np.isfinite(sv)
         lower_bound_hit = pp_valid & (pp_eaton < p_hydro)
         upper_bound_hit = pp_valid & (pp_eaton > (sv * 0.95))
+        pp_usable = pp_valid & ~lower_bound_hit & ~upper_bound_hit
+        pp = np.where(pp_usable, pp_eaton, np.nan)
         out["Pore_Pressure_Pp_MPa"] = pp
         out["Pore_Pressure_Pp_Eaton_Raw_MPa"] = pp_eaton
         out["Pore_Pressure_Hydrostatic_Reference_MPa"] = p_hydro
         out["Pore_Pressure_0p95Sv_Reference_MPa"] = sv * 0.95
         out["Pore_Pressure_Lower_Bound_Hit"] = lower_bound_hit.astype(int)
         out["Pore_Pressure_Upper_Bound_Hit"] = upper_bound_hit.astype(int)
+        # Valid means the raw calculation is finite; usable also passes the
+        # screening bounds and is the only value allowed into downstream models.
         out["Pore_Pressure_Estimate_Valid"] = pp_valid.astype(int)
-        out["Pore_Pressure_QC_Flag"] = (~pp_valid | lower_bound_hit | upper_bound_hit).astype(int)
+        out["Pore_Pressure_Estimate_Usable"] = pp_usable.astype(int)
+        out["Pore_Pressure_QC_Flag"] = (~pp_usable).astype(int)
 
         # --- Effective Stresses & Poroelastic Horizontal Stresses ---
         e_pa = out["Youngs_Modulus_GPa"].values * 1e9
@@ -541,6 +546,23 @@ class GeomechanicsCore:
             )
         if not np.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
             raise ValueError("Biot coefficient must be between 0 and 1.")
+
+        pressure_usable = row.get("Pore_Pressure_Estimate_Usable", np.nan)
+        if pd.isna(pressure_usable):
+            qc_flag = row.get("Pore_Pressure_QC_Flag", np.nan)
+            if pd.isna(qc_flag):
+                raise ValueError(
+                    "Pore-pressure QC status is missing at the selected depth; "
+                    "recompute the MEM results before trajectory analysis."
+                )
+            pressure_usable = float(qc_flag) == 0.0
+        pore_pressure = row.get("Pore_Pressure_Pp_MPa", np.nan)
+        if not bool(pressure_usable) or pd.isna(pore_pressure) or not np.isfinite(float(pore_pressure)):
+            raise ValueError(
+                "Pore-pressure estimate at the selected depth is not usable "
+                "(outside screening bounds or invalid). Calibrate the sonic trend "
+                "and recompute before running trajectory stability."
+            )
 
         sigma_enu = self._build_in_situ_stress_tensor(
             float(row["Overburden_Stress_Sv_MPa"]),

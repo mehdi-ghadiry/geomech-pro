@@ -5,6 +5,22 @@ import pandas as pd
 from config import PLATFORM_NAME, DEVELOPER_EMAIL, DEVELOPER_WHATSAPP
 
 
+def _format_stat(value, decimals: int) -> str:
+    """Format a finite report statistic, or mark unavailable QC values clearly."""
+    if pd.isna(value) or not np.isfinite(float(value)):
+        return "N/A (QC)"
+    return f"{float(value):.{decimals}f}"
+
+
+def _column_stat(results_df: pd.DataFrame, column: str, operation: str):
+    if column not in results_df:
+        return np.nan
+    values = pd.to_numeric(results_df[column], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if values.empty:
+        return np.nan
+    return getattr(values, operation)()
+
+
 def _pdf_safe(text: str) -> str:
     """
     fpdf's built-in core fonts (Helvetica, etc.) only support the Latin-1
@@ -93,20 +109,33 @@ def generate_pdf_report(
     pdf.set_font("helvetica", "", 10)
     pdf.set_text_color(50, 50, 50)
 
-    mean_ucs = results_df["UCS_MPa"].mean()
-    max_pp = results_df["Pore_Pressure_Pp_MPa"].max()
-    mean_shmin = results_df["Shmin_MPa"].mean()
-    mean_shmax = results_df["SHmax_MPa"].mean()
-    mean_sv = results_df["Overburden_Stress_Sv_MPa"].mean()
-    mean_collapse_emw = results_df["Collapse_EMW_SG"].mean()
-    mean_frac_emw = results_df["Fracture_EMW_SG"].mean()
+    mean_ucs = _column_stat(results_df, "UCS_MPa", "mean")
+    max_pp = _column_stat(results_df, "Pore_Pressure_Pp_MPa", "max")
+    mean_shmin = _column_stat(results_df, "Shmin_MPa", "mean")
+    mean_shmax = _column_stat(results_df, "SHmax_MPa", "mean")
+    mean_sv = _column_stat(results_df, "Overburden_Stress_Sv_MPa", "mean")
+    mean_collapse_emw = _column_stat(results_df, "Collapse_EMW_SG", "mean")
+    mean_frac_emw = _column_stat(results_df, "Fracture_EMW_SG", "mean")
+
+    pressure_usable = results_df.get(
+        "Pore_Pressure_Estimate_Usable", pd.Series(0, index=results_df.index)
+    ).fillna(0).astype(bool)
+    flagged_pressure_samples = int((~pressure_usable).sum())
+    pressure_qc_note = (
+        f"Pressure QC flagged {flagged_pressure_samples} of {len(results_df)} samples. "
+        "Raw Eaton estimates are retained for diagnosis; pressure-derived outputs are withheld at flagged depths. "
+        "Calibrate the sonic trend against well-specific measurements before operational use."
+        if flagged_pressure_samples
+        else "Pressure QC found no samples outside the configured screening bounds; field calibration is still required."
+    )
 
     summary_text = (
         f"This automated technical report presents the 1D Mechanical Earth Model (MEM) and Wellbore Stability analysis "
         f"for {well_name_safe}. Across the evaluated interval, the formation exhibits an average Unconfined Compressive Strength (UCS) "
-        f"of {mean_ucs:.1f} MPa. Pore pressure reaches a maximum of {max_pp:.1f} MPa. "
-        f"In-situ stress diagnostics indicate an average Overburden Stress (Sv) of {mean_sv:.1f} MPa, "
-        f"Minimum Horizontal Stress (Shmin) of {mean_shmin:.1f} MPa, and Maximum Horizontal Stress (SHmax) of {mean_shmax:.1f} MPa."
+        f"of {_format_stat(mean_ucs, 1)} MPa. Pore pressure reaches a maximum of {_format_stat(max_pp, 1)} MPa. "
+        f"In-situ stress diagnostics indicate an average Overburden Stress (Sv) of {_format_stat(mean_sv, 1)} MPa, "
+        f"Minimum Horizontal Stress (Shmin) of {_format_stat(mean_shmin, 1)} MPa, and Maximum Horizontal Stress (SHmax) of {_format_stat(mean_shmax, 1)} MPa.\n"
+        f"{pressure_qc_note}"
     )
     pdf.multi_cell(0, 5, summary_text)
     pdf.ln(6)
@@ -141,13 +170,13 @@ def generate_pdf_report(
 
     for label, col in params:
         if col in results_df.columns:
-            vmin = results_df[col].min()
-            vmean = results_df[col].mean()
-            vmax = results_df[col].max()
+            vmin = _column_stat(results_df, col, "min")
+            vmean = _column_stat(results_df, col, "mean")
+            vmax = _column_stat(results_df, col, "max")
             pdf.cell(70, 6, label, 1, 0, "L")
-            pdf.cell(40, 6, f"{vmin:.2f}", 1, 0, "C")
-            pdf.cell(40, 6, f"{vmean:.2f}", 1, 0, "C")
-            pdf.cell(40, 6, f"{vmax:.2f}", 1, 1, "C")
+            pdf.cell(40, 6, _format_stat(vmin, 2), 1, 0, "C")
+            pdf.cell(40, 6, _format_stat(vmean, 2), 1, 0, "C")
+            pdf.cell(40, 6, _format_stat(vmax, 2), 1, 1, "C")
 
     pdf.ln(6)
 
@@ -158,15 +187,20 @@ def generate_pdf_report(
     pdf.set_font("helvetica", "", 10)
     pdf.set_text_color(50, 50, 50)
 
-    mww_text = (
-        f"Based on the Mohr-Coulomb failure criterion and elastic stress distribution around a vertical wellbore:\n"
-        f"- **Shear Failure (Collapse) Gradient:** Averages {mean_collapse_emw:.2f} SG, representing the minimum required "
-        f"mud density to prevent breakouts and wellbore sloughing.\n"
-        f"- **Tensile Failure (Fracture) Gradient:** Averages {mean_frac_emw:.2f} SG, defining the upper operational limit "
-        f"to prevent lost circulation and mud losses.\n"
-        f"- **Operational Recommendation:** Maintain active drilling mud weight securely within the safe window "
-        f"[{mean_collapse_emw:.2f} SG - {mean_frac_emw:.2f} SG] to ensure borehole integrity."
-    )
+    if np.isfinite(mean_collapse_emw) and np.isfinite(mean_frac_emw):
+        mww_text = (
+            "Based on the Mohr-Coulomb failure criterion and elastic stress distribution around a vertical wellbore:\n"
+            f"- Shear Failure (Collapse) Gradient: averages {_format_stat(mean_collapse_emw, 2)} SG.\n"
+            f"- Tensile Failure (Fracture) Gradient: averages {_format_stat(mean_frac_emw, 2)} SG.\n"
+            f"- Screening window from valid samples only: [{_format_stat(mean_collapse_emw, 2)} SG - "
+            f"{_format_stat(mean_frac_emw, 2)} SG]. {pressure_qc_note}"
+        )
+    else:
+        mww_text = (
+            "Operational mud-weight window and recommendation are withheld because no usable pressure-dependent "
+            "stability results are available. Review the pressure QC flags and calibrate the sonic trend before "
+            "recomputing. " + pressure_qc_note
+        )
     pdf.multi_cell(0, 5, mww_text)
     pdf.ln(8)
 

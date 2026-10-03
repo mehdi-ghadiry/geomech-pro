@@ -30,6 +30,7 @@ class BiotConsistencyTests(unittest.TestCase):
             "Shmin_MPa": 30.0,
             "SHmax_MPa": 40.0,
             "Pore_Pressure_Pp_MPa": 20.0,
+            "Pore_Pressure_Estimate_Usable": 1,
             "Poisson_Ratio": 0.25,
             "UCS_MPa": 25.0,
         }

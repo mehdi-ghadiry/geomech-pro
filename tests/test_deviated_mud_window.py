@@ -29,6 +29,7 @@ class DeviatedMudWindowTests(unittest.TestCase):
             "Shmin_MPa": 80.0,
             "SHmax_MPa": 90.0,
             "Pore_Pressure_Pp_MPa": 40.0,
+            "Pore_Pressure_Estimate_Usable": 1,
             "Poisson_Ratio": 0.25,
             "UCS_MPa": 1.0,
         }
@@ -46,6 +47,7 @@ class DeviatedMudWindowTests(unittest.TestCase):
             "Shmin_MPa": 30.0,
             "SHmax_MPa": 35.0,
             "Pore_Pressure_Pp_MPa": 15.0,
+            "Pore_Pressure_Estimate_Usable": 1,
             "Poisson_Ratio": 0.25,
             "UCS_MPa": 350.0,
         }
@@ -62,6 +64,7 @@ class DeviatedMudWindowTests(unittest.TestCase):
             "Shmin_MPa": 30.0,
             "SHmax_MPa": 35.0,
             "Pore_Pressure_Pp_MPa": 15.0,
+            "Pore_Pressure_Estimate_Usable": 1,
             "Poisson_Ratio": 0.25,
             "UCS_MPa": 350.0,
         }
