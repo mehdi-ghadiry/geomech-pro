@@ -511,8 +511,11 @@ class GeomechanicsCore:
             kir = self._kirsch_wall_stresses(sigma_well, pp, Pw, nu, theta)
             mean = 0.5 * (kir["sigma_tt_eff"] + kir["sigma_zz_eff"])
             rad = np.sqrt((0.5 * (kir["sigma_tt_eff"] - kir["sigma_zz_eff"])) ** 2 + (kir["tau_tz_total"]) ** 2)
-            s1 = mean + rad
-            s3 = mean - rad
+            # At the wall, radial shear tractions vanish. The radial stress
+            # is therefore the third eigenvalue alongside the two eigenvalues
+            # of the coupled tangential/axial block. Rank all three for MC.
+            s1 = np.maximum(mean + rad, kir["sigma_rr_eff"])
+            s3 = np.minimum(mean - rad, kir["sigma_rr_eff"])
             if not np.any(self._mohr_coulomb_collapse_check(s1, s3, ucs, friction_angle_deg)):
                 collapse_mw = float(mw)
                 break
