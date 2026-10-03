@@ -167,6 +167,10 @@ class GeomechanicsCore:
         Full 1D MEM computation. Depth must be explicitly identified as TVD.
         Eaton pressure estimates are reported without silently clipping them.
         """
+        biot_alpha = float(biot_alpha)
+        if not np.isfinite(biot_alpha) or not 0.0 <= biot_alpha <= 1.0:
+            raise ValueError("Biot coefficient must be between 0 and 1.")
+
         depth_reference = str(depth_reference or "").strip().upper()
         if depth_reference != "TVD":
             raise ValueError(
@@ -190,6 +194,7 @@ class GeomechanicsCore:
         if len(depth_m) > 1 and np.any(np.diff(depth_m) < 0.0):
             raise ValueError("TVD depths must be ordered from shallow to deep before computation.")
         out["Depth"] = depth_m
+        out["Biot_Coefficient"] = biot_alpha
 
         # --- Unit normalization ---
         dt = pd.to_numeric(df[dt_col], errors="coerce").values.copy()
@@ -468,6 +473,7 @@ class GeomechanicsCore:
         pp_mpa: float,
         pw_mpa: float,
         nu: float,
+        biot_alpha: float,
         theta_rad: np.ndarray,
     ) -> dict:
         sxx, syy, szz = float(sigma_well[0, 0]), float(sigma_well[1, 1]), float(sigma_well[2, 2])
@@ -477,12 +483,13 @@ class GeomechanicsCore:
         c2, s2 = np.cos(2.0 * theta_rad), np.sin(2.0 * theta_rad)
         c1, s1 = np.cos(theta_rad), np.sin(theta_rad)
 
-        s_rr_eff = (pw - pp) * np.ones_like(theta_rad)
+        alpha = float(biot_alpha)
+        s_rr_eff = (pw - alpha * pp) * np.ones_like(theta_rad)
         s_tt_total = (sxx + syy) - 2.0 * (sxx - syy) * c2 - 4.0 * txy * s2 - pw
-        s_tt_eff = s_tt_total - pp
+        s_tt_eff = s_tt_total - alpha * pp
         s_zz_total = szz - 2.0 * nu * (sxx - syy) * c2 - 4.0 * nu * txy * s2
         tau_tz_total = 2.0 * (tyz * c1 - txz * s1)
-        s_zz_eff = s_zz_total - pp
+        s_zz_eff = s_zz_total - alpha * pp
 
         return {
             "sigma_rr_eff": s_rr_eff,
@@ -514,12 +521,26 @@ class GeomechanicsCore:
         mud_weight_sg_max: float = 2.50,
         mud_weight_sg_step: float = 0.01,
         n_theta: int = 181,
+        biot_alpha=None,
     ) -> dict:
         if mem_df is None or mem_df.empty:
             raise ValueError("mem_df is empty.")
 
         idx = (mem_df["Depth"] - float(depth_m)).abs().idxmin()
         row = mem_df.loc[idx]
+
+        stored_alpha = row.get("Biot_Coefficient", np.nan)
+        if pd.notna(stored_alpha):
+            alpha = float(stored_alpha)
+        elif biot_alpha is not None:
+            alpha = float(biot_alpha)
+        else:
+            raise ValueError(
+                "Biot coefficient is missing from the MEM results; provide it explicitly "
+                "to calculate deviated-well stability."
+            )
+        if not np.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
+            raise ValueError("Biot coefficient must be between 0 and 1.")
 
         sigma_enu = self._build_in_situ_stress_tensor(
             float(row["Overburden_Stress_Sv_MPa"]),
@@ -542,7 +563,7 @@ class GeomechanicsCore:
 
         for mw in mws:
             Pw = float(mw) * mpam_per_m * depth_use
-            kir = self._kirsch_wall_stresses(sigma_well, pp, Pw, nu, theta)
+            kir = self._kirsch_wall_stresses(sigma_well, pp, Pw, nu, alpha, theta)
             mean = 0.5 * (kir["sigma_tt_eff"] + kir["sigma_zz_eff"])
             rad = np.sqrt((0.5 * (kir["sigma_tt_eff"] - kir["sigma_zz_eff"])) ** 2 + (kir["tau_tz_total"]) ** 2)
             # At the wall, radial shear tractions vanish. The radial stress
@@ -556,14 +577,15 @@ class GeomechanicsCore:
 
         # Calculate final state with the determined collapse mud weight
         final_pw = collapse_mw * mpam_per_m * depth_use
-        final_kir = self._kirsch_wall_stresses(sigma_well, pp, final_pw, nu, theta)
+        final_kir = self._kirsch_wall_stresses(sigma_well, pp, final_pw, nu, alpha, theta)
 
         # Calculate final state with the determined collapse mud weight
         final_pw = collapse_mw * mpam_per_m * depth_use
-        final_kir = self._kirsch_wall_stresses(sigma_well, pp, final_pw, nu, theta)
+        final_kir = self._kirsch_wall_stresses(sigma_well, pp, final_pw, nu, alpha, theta)
 
         return {
             "collapse_emw_sg": float(collapse_mw),
+            "biot_alpha_used": float(alpha),
             "theta_rad": theta.tolist() if hasattr(theta, "tolist") else list(theta),
             "sigma_tt_eff": final_kir["sigma_tt_eff"].tolist() if hasattr(final_kir["sigma_tt_eff"], "tolist") else list(final_kir["sigma_tt_eff"]),
         }
