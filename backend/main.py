@@ -211,6 +211,7 @@ class DeviatedStabilityRequest(BaseModel):
     mud_weight_sg_max: float = 2.50
     mud_weight_sg_step: float = 0.01
     n_theta: int = 181
+    biot_alpha: Optional[float] = None
 
 
 @app.post("/api/v1/mem/deviated_stability")
@@ -232,6 +233,7 @@ def deviated_stability(payload: DeviatedStabilityRequest) -> Dict[str, Any]:
             mud_weight_sg_max=float(payload.mud_weight_sg_max),
             mud_weight_sg_step=float(payload.mud_weight_sg_step),
             n_theta=int(payload.n_theta),
+            biot_alpha=payload.biot_alpha,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -240,6 +242,7 @@ def deviated_stability(payload: DeviatedStabilityRequest) -> Dict[str, Any]:
 
     return {
         "collapse_emw_sg": float(out["collapse_emw_sg"]),
+        "biot_alpha_used": float(out["biot_alpha_used"]),
         "theta_rad": np.asarray(out["theta_rad"], dtype=float).tolist(),
         "sigma_tt_eff": np.asarray(out["sigma_tt_eff"], dtype=float).tolist(),
     }

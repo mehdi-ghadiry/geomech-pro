@@ -500,6 +500,7 @@ if results_df is not None:
             shmin = get_val(["Shmin_MPa"], 32.0)
             shmax = get_val(["SHmax_MPa"], 42.0)
             pp = get_val(["Pore_Pressure_Pp_MPa", "Pp_MPa"], 22.0)
+            row_biot_alpha = get_val(["Biot_Coefficient"], biot_alpha)
             ucs = get_val(["UCS_MPa"], 45.0)
             friction_ang = get_val(["Friction_Angle_deg", "Phi_deg", "Internal_Friction_deg"], 30.0)
 
@@ -542,8 +543,8 @@ if results_df is not None:
             tau_rth = -s_diff * (1.0 + 2.0 * eta - 3.0 * (eta**2)) * np.sin(2.0 * THETA)
 
             # Effective Stresses
-            sig_r_eff = sig_r - pp
-            sig_th_eff = sig_th - pp
+            sig_r_eff = sig_r - row_biot_alpha * pp
+            sig_th_eff = sig_th - row_biot_alpha * pp
 
             # Principal In-Plane Stresses
             c_stress = (sig_r_eff + sig_th_eff) / 2.0
@@ -685,6 +686,7 @@ if results_df is not None:
                 "well_azimuth_deg": float(well_azimuth),
                 "shmax_azimuth_deg": float(shmax_azimuth),
                 "friction_angle_deg": float(friction_angle_input),
+                "biot_alpha": float(row_biot_alpha),
             }
 
             dev_result = None
