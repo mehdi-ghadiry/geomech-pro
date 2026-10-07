@@ -59,7 +59,7 @@ def _json_safe_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def get_las_columns(file_bytes: bytes, filename: str) -> Dict[str, Any]:
-    """Returns {"columns": [...], "row_count": int} for the uploaded file."""
+    """Returns columns, row_count and parsed input records (no MEM computation)."""
     try:
         resp = requests.post(
             f"{BACKEND_URL}/api/v1/las/columns",
