@@ -19,3 +19,27 @@ GeoMechanics_SaaS/
 │   └── requirements.txt
 ├── requirements.txt
 └── README.md
+```
+
+## Input preview and calculation modes
+- **Input logs only** (default): plots parsed file values before calibration,
+  lithology or TVD gates. Missing samples remain gaps; no pressure/stress model
+  is run. Preview units and depth reference are explicitly unverified.
+- **Engineering (calibration required)**: retains the normal-sonic-trend
+  calibration declaration and all existing QC checks. A declaration is not
+  independent field validation.
+- **Educational / experimental**: requires an educational-use acknowledgement
+  and verified input units. It bypasses only the normal-trend declaration, not
+  depth-reference, lithology, physical-property or pressure/stress QC. Generic
+  defaults may still fail QC; they are not automatically adjusted to make plots.
+
+Computed records retain `Calculation_Mode`, `Normal_Trend_Calibrated` and
+`Result_Use_Warning`, including CSV, stored records and derived stability API
+responses. Educational plots and every PDF page carry a non-engineering-use
+warning. Numerical formulas are unchanged.
+
+Run regression tests from the repository root:
+```sh
+python -m unittest discover -s tests -v
+```
+Synthetic test fixtures demonstrate software behavior, not engineering validity.

@@ -110,6 +110,8 @@ async def get_las_columns(las_file: UploadFile = File(...)) -> Dict[str, Any]:
     return {
         "columns": columns,
         "row_count": int(len(df)),
+        # Parsed input only: no interpolation, unit conversion or MEM calculation.
+        "records": df.replace([np.inf, -np.inf], np.nan).replace({np.nan: None}).to_dict(orient="records"),
     }
 
 
@@ -128,6 +130,7 @@ async def compute_mem(
     dt_surface: float = Form(180.0),
     compaction_coefficient: float = Form(0.0003),
     normal_trend_calibrated: bool = Form(False),
+    calculation_mode: str = Form("engineering"),
     eaton_n: float = Form(3.0),
     tectonic_ex: float = Form(0.0005),
     tectonic_ey: float = Form(0.0002),
@@ -180,6 +183,7 @@ async def compute_mem(
             dt_surface=dt_surface,
             compaction_coefficient=compaction_coefficient,
             normal_trend_calibrated=normal_trend_calibrated,
+            calculation_mode=calculation_mode,
             eaton_n=eaton_n,
             tectonic_ex=tectonic_ex,
             stress_regime=stress_regime,
@@ -275,6 +279,9 @@ def deviated_stability(payload: DeviatedStabilityRequest) -> Dict[str, Any]:
         "status": out["status"],
         "max_tested_mud_weight_sg": float(out["max_tested_mud_weight_sg"]),
         "biot_alpha_used": float(out["biot_alpha_used"]),
+        "Calculation_Mode": out["Calculation_Mode"],
+        "Normal_Trend_Calibrated": out["Normal_Trend_Calibrated"],
+        "Result_Use_Warning": out["Result_Use_Warning"],
         "theta_rad": np.asarray(out["theta_rad"], dtype=float).tolist(),
         "sigma_tt_eff": np.asarray(out["sigma_tt_eff"], dtype=float).tolist(),
     }
