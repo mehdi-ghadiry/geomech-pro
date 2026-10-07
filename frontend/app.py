@@ -34,6 +34,8 @@ from plotly.subplots import make_subplots
 import api_client
 from api_client import BackendError
 from depth_units import depth_from_meters, depth_to_meters
+from log_preview import (find_shear_curve, raw_log_figure, is_educational,
+                         label_educational_chart, EDUCATIONAL_WARNING, TEXT_METADATA)
 from config import (
     DEVELOPER_EMAIL,
     DEVELOPER_NAME,
@@ -145,6 +147,16 @@ with st.sidebar:
     )
 
     st.subheader("⚙️ Log Units & In-Situ Calibration")
+    calculation_mode_label = st.selectbox(
+        "Calculation mode",
+        ["Input logs only", "Engineering (calibration required)", "Educational / experimental"],
+        index=0,
+    )
+    calculation_mode = "educational" if calculation_mode_label == "Educational / experimental" else "engineering"
+    educational_acknowledged = False
+    if calculation_mode == "educational":
+        st.warning(EDUCATIONAL_WARNING + ". Generic trend settings are not field calibration.")
+        educational_acknowledged = st.checkbox("I understand these results are educational only")
     depth_reference_label = st.selectbox(
         "Selected depth curve represents",
         ["Choose depth reference...", "TVD (true vertical depth)", "MD (measured depth)"],
@@ -158,6 +170,10 @@ with st.sidebar:
     depth_unit = st.selectbox("Depth Unit", ["m", "ft"], index=0)
     sonic_unit = st.selectbox("Sonic Unit", ["us/ft", "us/m"], index=0)
     density_unit = st.selectbox("Density Unit", ["g/cm3", "kg/m3"], index=0)
+    units_confirmed = st.checkbox(
+        "I verified the selected depth, sonic and density units against the source",
+        value=False,
+    )
 
     # 🧭 Wellbore Trajectory Inputs for Deviated/Horizontal Wells
     st.subheader("🧭 Well Trajectory & In-Situ Azimuth")
@@ -257,7 +273,7 @@ if st.session_state["loaded_well_id"] is not None:
         results_df = pd.DataFrame(well_detail["results"])
         text_diagnostic_columns = {
             "Vs_Estimation_Method", "Stress_Regime", "Stress_Regime_Rule", "Stress_Regime_QC_Reason"
-        }
+        } | TEXT_METADATA
         for column in results_df.columns:
             if column not in text_diagnostic_columns:
                 results_df[column] = pd.to_numeric(results_df[column], errors="coerce")
@@ -291,7 +307,7 @@ elif uploaded_file is not None:
 
         dept_col = find_default(["dept", "depth"], columns)
         dt_col = find_default(["dt", "dtco"], columns)
-        dts_col = find_default(["dts", "dtsm"], columns)
+        dts_col = find_shear_curve(columns)
         rhob_col = find_default(["rhob", "den"], columns)
 
         st.sidebar.subheader("🎯 Curve Mapping")
@@ -299,6 +315,28 @@ elif uploaded_file is not None:
         sel_dt = st.sidebar.selectbox("Compressional Sonic (DT)", columns, index=columns.index(dt_col) if dt_col in columns else 0)
         sel_dts = st.sidebar.selectbox("Shear Sonic (DTS)", ["None"] + columns, index=(columns.index(dts_col) + 1) if dts_col in columns else 0)
         sel_rhob = st.sidebar.selectbox("Bulk Density (RHOB)", columns, index=columns.index(rhob_col) if rhob_col in columns else 0)
+
+        # Always render input logs BEFORE any computation gate (including lithology/TVD).
+        st.subheader("Input log preview (independent of calibration)")
+        st.caption("File values only. Units and depth reference are not validated by this preview; missing samples remain gaps.")
+        preview_options = [c for c in columns if c != sel_dept]
+        preview_defaults = list(dict.fromkeys(c for c in (sel_dt, sel_rhob) if c in preview_options))
+        preview_curves = st.multiselect("Input curves to preview (up to 6)", preview_options,
+                                        default=preview_defaults)
+        if preview_curves:
+            preview_fig = raw_log_figure(col_info["records"], sel_dept, preview_curves[:6])
+            st.plotly_chart(preview_fig, use_container_width=True, key="raw_log_preview")
+            st.download_button("Download input chart (HTML)", preview_fig.to_html().encode("utf-8"),
+                               file_name="input_logs_preview.html", mime="text/html")
+        if calculation_mode_label == "Input logs only":
+            st.info("Input-only mode: no pressure, stress or mud-weight calculation was requested.")
+            st.stop()
+        if calculation_mode == "educational" and not educational_acknowledged:
+            st.info("Acknowledge the educational-use warning to compute experimental results.")
+            st.stop()
+        if not units_confirmed:
+            st.warning("Verify log units against the source before computing, including in educational mode.")
+            st.stop()
 
         dts_actual = None if sel_dts == "None" else sel_dts
         if dts_actual is None:
@@ -356,7 +394,7 @@ elif uploaded_file is not None:
                 st.info("Select whether the chosen depth curve is TVD or MD before computing.")
             st.stop()
 
-        if not normal_trend_calibrated:
+        if not normal_trend_calibrated and calculation_mode != "educational":
             st.warning(
                 "Pressure, stress, and mud-weight calculations are paused. First calibrate the normal sonic trend "
                 "for this formation; the generic starting values are not safe to treat as field data."
@@ -378,6 +416,7 @@ elif uploaded_file is not None:
             "dt_surface": dt_surface,
             "compaction_coefficient": compaction_coefficient,
             "normal_trend_calibrated": normal_trend_calibrated,
+            "calculation_mode": calculation_mode,
             "eaton_n": eaton_exp,
             "tectonic_ex": tectonic_ex,
             "stress_regime": stress_regime,
@@ -400,7 +439,7 @@ elif uploaded_file is not None:
         results_df = pd.DataFrame(compute_result["results"])
         text_diagnostic_columns = {
             "Vs_Estimation_Method", "Stress_Regime", "Stress_Regime_Rule", "Stress_Regime_QC_Reason"
-        }
+        } | TEXT_METADATA
         for column in results_df.columns:
             if column not in text_diagnostic_columns:
                 results_df[column] = pd.to_numeric(results_df[column], errors="coerce")
@@ -473,6 +512,9 @@ elif uploaded_file is not None:
         st.error(f"❌ Execution Error: {str(e)}")
 
 if results_df is not None:
+    educational_results = is_educational(results_df)
+    if educational_results:
+        st.warning(EDUCATIONAL_WARNING + ". Calibration status is preserved in exported records.")
     display_depth = depth_from_meters(results_df["Depth"], depth_unit)
     depth_label = f"Depth ({depth_unit})"
     try:
@@ -577,6 +619,8 @@ if results_df is not None:
                 ),
                 margin=dict(l=50, r=40, t=120, b=60),
             )
+            if educational_results:
+                label_educational_chart(fig)
             st.plotly_chart(fig, use_container_width=True)
 
         # ==========================================
@@ -770,6 +814,8 @@ if results_df is not None:
             fig_sim.update_xaxes(title_text="X (m) [SHmax Direction →]", scaleanchor="y", row=1, col=2)
             fig_sim.update_yaxes(title_text="Y (m) [Shmin Direction ↑]", row=1, col=2)
 
+            if educational_results:
+                label_educational_chart(fig_sim)
             st.plotly_chart(fig_sim, use_container_width=True)
 
         # ==========================================
@@ -917,6 +963,8 @@ if results_df is not None:
                 fig_dev.update_xaxes(title_text="Wellbore Wall Angle θ (°)", row=1, col=1)
                 fig_dev.update_yaxes(title_text="Effective Hoop Stress σ'θθ (MPa)", row=1, col=1)
 
+                if educational_results:
+                    label_educational_chart(fig_dev)
                 st.plotly_chart(fig_dev, use_container_width=True)
 
                 st.success(
@@ -935,15 +983,10 @@ st.subheader("📑 Geomechanical Reporting & Data Export")
 col_exp1, col_exp2 = st.columns([1, 1])
 
 # پیدا کردن دیتافریم فعال حاصل از محاسبات
-active_df = None
-if "mem_df" in st.session_state and st.session_state["mem_df"] is not None:
-    active_df = st.session_state["mem_df"]
-elif "results_df" in locals() and locals()["results_df"] is not None:
-    active_df = locals()["results_df"]
-elif "df" in locals() and locals()["df"] is not None:
-    active_df = locals()["df"]
+active_df = results_df  # Never export stale session data or an uncomputed input frame.
 
 if active_df is not None:
+    well_id = (active_well_name or "Well-01").rsplit(".", 1)[0]
     # 1. دانلود گزارش رسمی PDF با تابع موجود در ریپازیتوری شما
     with col_exp1:
         try:
@@ -952,10 +995,6 @@ if active_df is not None:
             sys.path.append(os.path.abspath("backend"))
             from report_generator import generate_pdf_report
             
-            well_id = "TEST_WELL_A-1"
-            if uploaded_file is not None:
-                well_id = uploaded_file.name.rsplit(".", 1)[0]
-                
             pdf_bytes = generate_pdf_report(active_df, well_name=well_id, depth_unit=depth_unit)
             
             st.download_button(

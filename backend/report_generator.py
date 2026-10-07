@@ -58,6 +58,11 @@ class PDFReport(FPDF):
         self.set_text_color(200, 220, 255)
         self.set_xy(10, 14)
         self.cell(0, 6, f"{PLATFORM_NAME} | Email : {DEVELOPER_EMAIL} | WhatsApp : {DEVELOPER_WHATSAPP} ", 0, 1, "L")
+        if getattr(self, "educational", False):
+            self.set_font("helvetica", "B", 9)
+            self.set_text_color(180, 0, 0)
+            self.set_xy(10, 27)
+            self.cell(0, 5, "EDUCATIONAL ONLY - NOT FOR ENGINEERING DECISIONS", 0, 1, "L")
         self.ln(15)
 
     def footer(self):
@@ -86,6 +91,8 @@ def generate_pdf_report(
     depth_max = results_df["Depth"].max() * depth_factor
 
     pdf = PDFReport()
+    pdf.educational = ("Calculation_Mode" in results_df and
+                       results_df["Calculation_Mode"].eq("educational").any())
     pdf.well_name = well_name_safe
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -106,6 +113,15 @@ def generate_pdf_report(
         "L",
     )
     pdf.ln(4)
+
+    if pdf.educational:
+        pdf.set_font("helvetica", "B", 10)
+        pdf.set_text_color(180, 0, 0)
+        trend_declared = ("Normal_Trend_Calibrated" in results_df and
+                          results_df["Normal_Trend_Calibrated"].eq(True).all())
+        pdf.cell(0, 6, "Normal sonic trend: " + ("user-declared calibrated" if trend_declared else "UNCALIBRATED"), 0, 1, "L")
+        pdf.cell(0, 6, "Experimental results; no independent field validation.", 0, 1, "L")
+        pdf.ln(3)
 
     # Section 1: Executive Summary
     pdf.set_font("helvetica", "B", 11)

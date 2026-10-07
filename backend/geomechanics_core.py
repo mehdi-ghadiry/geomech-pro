@@ -303,6 +303,7 @@ class GeomechanicsCore:
         friction_angle=30.0,
         normal_pressure_grad=9.80665e-3,  # MPa/m (fresh water)
         assumed_shallow_density=2.0,       # g/cm3
+        calculation_mode="engineering",
     ):
         """
         Full 1D MEM computation. Depth must be explicitly identified as TVD.
@@ -333,7 +334,9 @@ class GeomechanicsCore:
                 "Normal-compaction transit times and Eaton exponent must be positive; "
                 "compaction coefficient cannot be negative."
             )
-        if not normal_trend_calibrated:
+        if calculation_mode not in {"engineering", "educational"}:
+            raise ValueError("calculation_mode must be engineering or educational.")
+        if not normal_trend_calibrated and calculation_mode != "educational":
             raise ValueError(
                 "Pore-pressure estimation is disabled until the normal sonic compaction trend "
                 "is calibrated for this formation using normally compacted local shale or "
@@ -650,6 +653,14 @@ class GeomechanicsCore:
         )
 
         out.replace([np.inf, -np.inf], np.nan, inplace=True)
+        # Persist provenance in records so CSV, saved wells and PDF retain it.
+        out["Calculation_Mode"] = calculation_mode
+        out["Normal_Trend_Calibrated"] = bool(normal_trend_calibrated)
+        out["Result_Use_Warning"] = (
+            "EDUCATIONAL ONLY - NOT FOR ENGINEERING DECISIONS"
+            if calculation_mode == "educational" else
+            "Calibration declared by user; independent field validation still required"
+        )
         return out
 
     # ---------- LOT/FIT Calibration ----------
@@ -1028,6 +1039,9 @@ class GeomechanicsCore:
             "status": "safe_weight_found" if solution_found else "no_safe_weight_in_tested_range",
             "max_tested_mud_weight_sg": float(mws[-1]),
             "biot_alpha_used": float(alpha),
+            "Calculation_Mode": row.get("Calculation_Mode", "unspecified"),
+            "Normal_Trend_Calibrated": bool(row.get("Normal_Trend_Calibrated", False)),
+            "Result_Use_Warning": row.get("Result_Use_Warning", "Calibration provenance not supplied"),
             "theta_rad": theta.tolist() if hasattr(theta, "tolist") else list(theta),
             "sigma_tt_eff": final_kir["sigma_tt_eff"].tolist() if hasattr(final_kir["sigma_tt_eff"], "tolist") else list(final_kir["sigma_tt_eff"]),
         }
