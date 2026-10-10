@@ -87,6 +87,25 @@ def compute_mem(file_bytes: bytes, filename: str, params: Dict[str, Any]) -> Dic
     return resp.json()
 
 
+def compute_deviated_stability(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Send tab-3 results without turning missing MEM values into invented numbers."""
+    clean_payload = dict(payload)
+    clean_payload["results"] = _json_safe_records(payload["results"])
+    for key, value in clean_payload.items():
+        if key != "results" and isinstance(value, (int, float)) and not math.isfinite(value):
+            raise BackendError(f"Trajectory input '{key}' must be a finite number.")
+    try:
+        resp = requests.post(
+            f"{BACKEND_URL}/api/v1/mem/deviated_stability",
+            json=clean_payload,
+            timeout=TIMEOUT_SECONDS,
+        )
+    except requests.exceptions.RequestException as exc:
+        raise BackendError(f"Could not reach backend at {BACKEND_URL}: {exc}")
+    _raise_for_backend_error(resp)
+    return resp.json()
+
+
 def generate_report_pdf(results: List[Dict[str, Any]], well_name: str) -> bytes:
     """Requests the PDF report for an already-computed result set."""
     try:

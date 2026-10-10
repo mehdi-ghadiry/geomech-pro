@@ -897,19 +897,18 @@ if results_df is not None:
                 "well_azimuth_deg": float(well_azimuth),
                 "shmax_azimuth_deg": float(shmax_azimuth),
                 "friction_angle_deg": float(friction_angle_input),
-                "biot_alpha": float(row_biot_alpha),
+                # The backend uses Biot from the selected tab-3 row first.
+                # Use the sidebar value only as fallback, not tab 2's selected row.
+                "biot_alpha": float(biot_alpha),
             }
 
             dev_result = None
             with st.spinner("Simulating 3D Wellbore Stresses on Server..."):
                 try:
-                    import requests
-                    backend_endpoint = f"{api_client.BACKEND_URL}/api/v1/mem/deviated_stability"
-                    resp = requests.post(backend_endpoint, json=dev_payload, timeout=20)
-                    if resp.status_code == 200:
-                        dev_result = resp.json()
-                    else:
-                        st.error(f"Backend calculation error ({resp.status_code}): {resp.text}")
+                    dev_result = api_client.compute_deviated_stability(dev_payload)
+                except api_client.BackendError as exc:
+                    st.error(f"Trajectory calculation unavailable: {exc}")
+                    st.info("If inputs are missing at the selected depth, choose another evaluation depth with valid pressure, stress and rock-property data. Calibration is not required in experimental mode.")
                 except Exception as exc:
                     st.error(f"Failed to communicate with calculation service: {exc}")
 
