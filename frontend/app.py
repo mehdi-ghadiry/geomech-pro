@@ -146,17 +146,28 @@ with st.sidebar:
         help="Upload a LAS log or a tabular export with a header row. Required curves: depth, DT, and RHOB; DTS is optional.",
     )
 
-    st.subheader("⚙️ Log Units & In-Situ Calibration")
+    st.subheader("⚙️ Calculation Mode & Log Units")
     calculation_mode_label = st.selectbox(
         "Calculation mode",
-        ["Input logs only", "Engineering (calibration required)", "Educational / experimental"],
+        ["Educational / experimental", "Engineering (calibration required)", "Input logs only"],
         index=0,
     )
     calculation_mode = "educational" if calculation_mode_label == "Educational / experimental" else "engineering"
-    educational_acknowledged = False
     if calculation_mode == "educational":
         st.warning(EDUCATIONAL_WARNING + ". Generic trend settings are not field calibration.")
-        educational_acknowledged = st.checkbox("I understand these results are educational only")
+        st.caption("Quick test: calibration is optional. Assumptions and disabled filters remain recorded in the output.")
+    with st.expander("Optional filters & experimental assumptions", expanded=False):
+        engineering_mode = calculation_mode != "educational"
+        apply_log_range_filter = st.checkbox("Apply typical DT / DTS / density range filter", value=engineering_mode, disabled=engineering_mode)
+        apply_pressure_screen = st.checkbox("Exclude Eaton pressure above 0.95 × Sv", value=engineering_mode, disabled=engineering_mode)
+        apply_stress_screen = st.checkbox("Enforce selected stress regime and Shmin screening floor", value=engineering_mode, disabled=engineering_mode)
+        apply_property_bounds = st.checkbox("Apply default elastic / strength / Poisson bounds", value=engineering_mode, disabled=engineering_mode)
+        interpolation_max_gap = st.number_input("Maximum internal gap to interpolate (samples; 0 = off)", min_value=0, max_value=100, value=5, step=1)
+        experimental_hydrostatic_fallback = st.checkbox("Experimental: use hydrostatic pressure when Eaton is invalid", value=not engineering_mode, disabled=engineering_mode)
+        experimental_vertical_depth = st.checkbox("Experimental: assume a vertical well if depth is MD or unspecified", value=not engineering_mode, disabled=engineering_mode)
+        assume_vs_ratio = st.checkbox("Experimental: assume Vs/Vp if DTS is absent (no lithology fit)", value=not engineering_mode, disabled=engineering_mode)
+        demo_vs_ratio = st.number_input("Assumed Vs/Vp ratio", min_value=0.1, max_value=0.85, value=0.5, step=0.05, disabled=not assume_vs_ratio)
+        st.caption("Experimental defaults are assumptions, not measured data. Non-finite values, non-positive log values, and unstable elastic pairs remain excluded in every mode.")
     depth_reference_label = st.selectbox(
         "Selected depth curve represents",
         ["Choose depth reference...", "TVD (true vertical depth)", "MD (measured depth)"],
@@ -216,7 +227,7 @@ with st.sidebar:
             value=False,
             help="Enable only after calibrating the trend against normally compacted local shale and/or field pressure references.",
         )
-        st.caption("Negative estimates and estimates above the overburden screening limit are excluded from stresses and mud-weight calculations. Generic defaults are not field calibration.")
+        st.caption("Negative Eaton pressure is never used. Experimental mode can use a clearly flagged hydrostatic assumption instead. Engineering mode also excludes pressure above 0.95 × Sv.")
         eaton_exp = st.slider("Eaton's Exponent", 1.0, 5.0, 3.0, 0.1)
         assumed_shallow_density = st.number_input(
             "Assumed Shallow Density Above Log Top (g/cm3)",
@@ -331,15 +342,17 @@ elif uploaded_file is not None:
         if calculation_mode_label == "Input logs only":
             st.info("Input-only mode: no pressure, stress or mud-weight calculation was requested.")
             st.stop()
-        if calculation_mode == "educational" and not educational_acknowledged:
-            st.info("Acknowledge the educational-use warning to compute experimental results.")
-            st.stop()
         if not units_confirmed:
-            st.warning("Verify log units against the source before computing, including in educational mode.")
-            st.stop()
+            st.warning("Units are unverified: selected units are assumptions until checked against the source.")
+            if calculation_mode != "educational":
+                st.stop()
 
         dts_actual = None if sel_dts == "None" else sel_dts
-        if dts_actual is None:
+        experimental_vs_ratio = demo_vs_ratio if dts_actual is None and assume_vs_ratio else None
+        if experimental_vs_ratio is not None:
+            lithology_group = "unspecified"
+            st.warning(f"EXPERIMENTAL: Vs/Vp = {experimental_vs_ratio:.2f} is assumed, not measured or inferred from lithology.")
+        elif dts_actual is None:
             vs_lithology_label = st.sidebar.selectbox(
                 "Lithology group (only if DTS is missing)",
                 [
@@ -384,7 +397,9 @@ elif uploaded_file is not None:
         else:
             lithology_group = "measured_dts"
 
-        if depth_reference != "TVD":
+        if depth_reference != "TVD" and experimental_vertical_depth:
+            st.warning("EXPERIMENTAL: uploaded depth is assumed vertical. No MD-to-TVD trajectory conversion was performed.")
+        elif depth_reference != "TVD":
             if depth_reference == "MD":
                 st.warning(
                     "This version cannot convert MD to TVD without a measured well trajectory. "
@@ -417,6 +432,14 @@ elif uploaded_file is not None:
             "compaction_coefficient": compaction_coefficient,
             "normal_trend_calibrated": normal_trend_calibrated,
             "calculation_mode": calculation_mode,
+            "apply_log_range_filter": apply_log_range_filter,
+            "apply_pressure_screen": apply_pressure_screen,
+            "apply_stress_screen": apply_stress_screen,
+            "apply_property_bounds": apply_property_bounds,
+            "interpolation_max_gap": int(interpolation_max_gap),
+            "experimental_hydrostatic_fallback": experimental_hydrostatic_fallback,
+            "experimental_vertical_depth": experimental_vertical_depth,
+            "units_confirmed": units_confirmed,
             "eaton_n": eaton_exp,
             "tectonic_ex": tectonic_ex,
             "stress_regime": stress_regime,
@@ -427,6 +450,8 @@ elif uploaded_file is not None:
             "well_azimuth": well_azimuth,
             "shmax_azimuth": shmax_azimuth,
         }
+        if experimental_vs_ratio is not None:
+            compute_params["experimental_vs_ratio"] = experimental_vs_ratio
         if use_lot_calibration:
             compute_params["lot_depth"] = lot_depth_input
             compute_params["lot_pressure_mpa"] = lot_pressure_input
@@ -450,7 +475,7 @@ elif uploaded_file is not None:
             negative_pp = int(results_df.get("Pore_Pressure_Negative_Flag", pd.Series(0, index=results_df.index)).fillna(0).sum())
             st.warning(
                 f"Eaton pressure failed quality checks at {invalid_pp} samples, including {negative_pp} negative estimates. "
-                "Invalid pressure values are excluded from the stress and mud-weight calculations; gaps in those outputs are intentional. "
+                "Screening exclusions depend on the selected filters. Experimental hydrostatic substitutions are flagged separately; raw Eaton values are never overwritten. "
                 "Recalibrate the normal sonic trend against normally compacted local shale and field measurements before operational use."
             )
         if "Elastic_Properties_Valid" in results_df.columns:
@@ -470,12 +495,16 @@ elif uploaded_file is not None:
                 st.warning(
                     f"Stress-regime QC failed at {stress_qc_failed} samples for the selected {stress_regime_label} assumption. "
                     "Raw calculated stresses remain available for diagnosis, but Shmin/SHmax and dependent failure/mud-window "
-                    "outputs are withheld at those samples. Review Stress_Regime_QC_Reason and validate the regime against field data."
+                    "outputs are withheld only when stress screening is enabled. With screening off, raw values are experimental only. Review Stress_Regime_QC_Reason and validate the regime against field data."
                 )
         active_well_name = uploaded_file.name
         compute_params_used = compute_params
         data_source = "upload"
 
+        if "Experimental_Hydrostatic_Fallback_Used" in results_df:
+            fallback_count = int(results_df["Experimental_Hydrostatic_Fallback_Used"].sum())
+            if fallback_count:
+                st.warning(f"EXPERIMENTAL hydrostatic pressure substituted at {fallback_count} samples. Raw Eaton values and QC flags remain available; this is not pressure calibration.")
         calib_info = compute_result.get("calibration")
         if calib_info:
             requested_depth_display = float(depth_from_meters(calib_info["requested_depth"], depth_unit))

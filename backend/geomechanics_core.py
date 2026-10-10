@@ -304,12 +304,23 @@ class GeomechanicsCore:
         normal_pressure_grad=9.80665e-3,  # MPa/m (fresh water)
         assumed_shallow_density=2.0,       # g/cm3
         calculation_mode="engineering",
+        apply_log_range_filter=True,
+        apply_pressure_screen=True,
+        apply_stress_screen=True,
+        apply_property_bounds=True,
+        interpolation_max_gap=5,
+        experimental_hydrostatic_fallback=False,
+        experimental_vertical_depth=False,
+        experimental_vs_ratio=None,
+        units_confirmed=False,
     ):
         """
         Full 1D MEM computation. Depth must be explicitly identified as TVD.
-        Eaton pressure requires an explicitly confirmed, field-calibrated normal
-        sonic trend. Raw estimates remain available for QC; negative or excessive
-        estimates are excluded from dependent stresses and mud-weight calculations.
+        Engineering mode requires a user-confirmed calibrated normal sonic trend.
+        Educational mode permits explicit relaxed screens and assumed depth,
+        Vs/Vp, or hydrostatic fallback. Original Eaton estimates and QC flags
+        remain available; non-positive logs and unstable elastic pairs are never
+        made valid by turning off an optional filter.
         """
         biot_alpha = float(biot_alpha)
         if not np.isfinite(biot_alpha) or not 0.0 <= biot_alpha <= 1.0:
@@ -343,8 +354,22 @@ class GeomechanicsCore:
                 "field reference pressures. Supply calibrated trend settings and confirm them."
             )
 
+        # Relaxed screening and synthetic assumptions are explicit experimental options.
+        experimental = calculation_mode == "educational"
+        if not experimental and (
+            not all((apply_log_range_filter, apply_pressure_screen, apply_stress_screen, apply_property_bounds))
+            or experimental_hydrostatic_fallback or experimental_vertical_depth
+            or experimental_vs_ratio is not None
+        ):
+            raise ValueError("Relaxed filters and assumed depth/Vs/pressure require educational mode.")
+        if not isinstance(interpolation_max_gap, (int, np.integer)) or not 0 <= interpolation_max_gap <= 100:
+            raise ValueError("Interpolation maximum gap must be an integer from 0 to 100 samples.")
+        if experimental_vs_ratio is not None:
+            experimental_vs_ratio = float(experimental_vs_ratio)
+            if not np.isfinite(experimental_vs_ratio) or not 0 < experimental_vs_ratio < np.sqrt(3.0 / 4.0):
+                raise ValueError("Experimental Vs/Vp ratio must be positive and below sqrt(3/4).")
         depth_reference = str(depth_reference or "").strip().upper()
-        if depth_reference != "TVD":
+        if depth_reference != "TVD" and not experimental_vertical_depth:
             raise ValueError(
                 "This computation requires a TVD depth curve. MD cannot be used "
                 "without a measured well trajectory for conversion; select a TVD "
@@ -366,6 +391,10 @@ class GeomechanicsCore:
         if len(depth_m) > 1 and np.any(np.diff(depth_m) < 0.0):
             raise ValueError("TVD depths must be ordered from shallow to deep before computation.")
         out["Depth"] = depth_m
+        out["Depth_Reference_Used"] = (
+            "ASSUMED VERTICAL DEPTH - NOT TRAJECTORY CONVERTED"
+            if depth_reference != "TVD" else "TVD declared by user"
+        )
         out["Biot_Coefficient"] = biot_alpha
 
         # --- Unit normalization ---
@@ -385,13 +414,17 @@ class GeomechanicsCore:
             rhob = rhob / 1000.0
 
         # --- Outlier rejection & Quality Control (QC) ---
-        rhob = np.where((rhob < 1.0) | (rhob > 3.6), np.nan, rhob)
-        dt = np.where((dt < 35.0) | (dt > 250.0), np.nan, dt)
+        # Non-finite/non-positive values are unusable regardless of optional range filters.
+        rhob = np.where(np.isfinite(rhob) & (rhob > 0), rhob, np.nan)
+        dt = np.where(np.isfinite(dt) & (dt > 0), dt, np.nan)
+        if apply_log_range_filter:
+            rhob = np.where((rhob < 1.0) | (rhob > 3.6), np.nan, rhob)
+            dt = np.where((dt < 35.0) | (dt > 250.0), np.nan, dt)
 
         # Fill only short, fully bounded internal gaps. Keep edge gaps and
         # longer outages missing so they cannot silently become synthetic logs.
-        rhob = self._interpolate_short_internal_gaps(rhob, max_gap=5)
-        dt = self._interpolate_short_internal_gaps(dt, max_gap=5)
+        rhob = self._interpolate_short_internal_gaps(rhob, max_gap=interpolation_max_gap)
+        dt = self._interpolate_short_internal_gaps(dt, max_gap=interpolation_max_gap)
         if not np.isfinite(rhob).any():
             raise ValueError("No valid RHOB values remain after unit conversion and quality screening.")
         if not np.isfinite(dt).any():
@@ -402,12 +435,17 @@ class GeomechanicsCore:
             dts = pd.to_numeric(df[dts_col], errors="coerce").values.copy()
             if sonic_unit_key == "us/m":
                 dts = dts / 3.28084
-            dts = np.where((dts < 35.0) | (dts > 500.0), np.nan, dts)
-            dts = self._interpolate_short_internal_gaps(dts, max_gap=5)
+            dts = np.where(np.isfinite(dts) & (dts > 0), dts, np.nan)
+            if apply_log_range_filter:
+                dts = np.where((dts < 35.0) | (dts > 500.0), np.nan, dts)
+            dts = self._interpolate_short_internal_gaps(dts, max_gap=interpolation_max_gap)
             vs_estimation_method = "Measured DTS"
         else:
             lithology_group = str(lithology_group or "unspecified").strip().lower()
-            if lithology_group == "water_saturated_clastic":
+            if experimental_vs_ratio is not None:
+                dts = dt / experimental_vs_ratio
+                vs_estimation_method = "EXPERIMENTAL assumed Vs/Vp ratio (not a lithology relation)"
+            elif lithology_group == "water_saturated_clastic":
                 dts = self._castagna_clastic_dts_us_ft(dt)
                 vs_estimation_method = "Castagna mudrock line (water-saturated clastic only)"
             elif lithology_group in {"limestone", "dolomite"}:
@@ -468,22 +506,24 @@ class GeomechanicsCore:
         out["Elastic_Properties_QC_Flag"] = (~elastic_valid).astype(int)
 
         # Static correction; invalid elastic rows remain missing, not clamped.
+        def property_bound(values, low, high):
+            return np.clip(values, low, high) if apply_property_bounds else values
         out["Youngs_Modulus_GPa"] = np.where(
-            elastic_valid, np.clip(0.7 * e_dyn, 0.5, 120.0), np.nan
+            elastic_valid, property_bound(0.7 * e_dyn, 0.5, 120.0), np.nan
         )
         out["Shear_Modulus_GPa"] = np.where(
-            elastic_valid, np.clip(0.7 * mu_dyn, 0.2, 50.0), np.nan
+            elastic_valid, property_bound(0.7 * mu_dyn, 0.2, 50.0), np.nan
         )
         out["Bulk_Modulus_GPa"] = np.where(
-            elastic_valid, np.clip(0.7 * k_dyn, 0.5, 150.0), np.nan
+            elastic_valid, property_bound(0.7 * k_dyn, 0.5, 150.0), np.nan
         )
         out["Poisson_Ratio"] = np.where(
-            elastic_valid, np.clip(nu_dyn, 0.10, 0.45), np.nan
+            elastic_valid, property_bound(nu_dyn, 0.10, 0.45), np.nan
         )
 
         # --- Rock Strength ---
-        out["UCS_MPa"] = np.clip(0.77 * (out["Youngs_Modulus_GPa"].values * 1000.0) ** 0.91 / 100.0, 1.0, 350.0)
-        out["Tensile_Strength_MPa"] = np.clip(out["UCS_MPa"].values / 12.0, 0.1, 30.0)
+        out["UCS_MPa"] = property_bound(0.77 * (out["Youngs_Modulus_GPa"].values * 1000.0) ** 0.91 / 100.0, 1.0, 350.0)
+        out["Tensile_Strength_MPa"] = property_bound(out["UCS_MPa"].values / 12.0, 0.1, 30.0)
         out["Friction_Angle_deg"] = float(friction_angle)
 
         # --- Overburden Stress Sv (MPa) ---
@@ -525,7 +565,14 @@ class GeomechanicsCore:
         estimate_valid = finite_estimate & ~negative_pressure_hit & ~upper_bound_hit
         invalid_count = int((~estimate_valid).sum())
         negative_count = int(negative_pressure_hit.sum())
-        if not estimate_valid.any():
+        pressure_usable = finite_estimate & ~negative_pressure_hit
+        if apply_pressure_screen:
+            pressure_usable &= ~upper_bound_hit
+        fallback_used = (
+            ~pressure_usable & np.isfinite(p_hydro) & (p_hydro >= 0) & np.isfinite(sv)
+            if experimental_hydrostatic_fallback else np.zeros(len(out), dtype=bool)
+        )
+        if not (pressure_usable | fallback_used).any():
             raise ValueError(
                 "No physically admissible pore-pressure estimates remain: "
                 f"{negative_count} samples are negative and {int(upper_bound_hit.sum())} "
@@ -535,7 +582,12 @@ class GeomechanicsCore:
                 "formation data before calculating stresses or mud weight."
             )
 
-        pp = np.where(estimate_valid, pp_eaton, np.nan)
+        pp = np.where(pressure_usable, pp_eaton, np.where(fallback_used, p_hydro, np.nan))
+        out["Experimental_Hydrostatic_Fallback_Used"] = fallback_used.astype(int)
+        out["Pore_Pressure_Source"] = np.where(
+            fallback_used, "EXPERIMENTAL hydrostatic assumption - Eaton rejected",
+            np.where(pressure_usable, "Eaton sonic estimate", "Unavailable")
+        )
         out["Pore_Pressure_Pp_MPa"] = pp
         out["Pore_Pressure_Pp_Eaton_Raw_MPa"] = pp_eaton
         out["Pore_Pressure_Hydrostatic_Reference_MPa"] = p_hydro
@@ -554,7 +606,7 @@ class GeomechanicsCore:
         pp_pa = pp * 1e6
         sig_v_eff = np.maximum(sv_pa - biot_alpha * pp_pa, 1e4)
 
-        nu_eff = np.clip(nu, gassi_min_poisson, gassi_poisson)
+        nu_eff = property_bound(nu, gassi_min_poisson, gassi_poisson)
 
         # Generalized Poroelastic Plane Strain Formulation:
         # Shmin_eff = (nu/(1-nu))*Sig_v + (E/(1-nu^2))*(ey + nu*ex)
@@ -604,8 +656,9 @@ class GeomechanicsCore:
         out["Stress_Regime_QC_Flag"] = (~stress_valid).astype(int)
         out["Stress_Regime_QC_Reason"] = qc_reason
         out["Shmin_Screening_Floor_MPa"] = pp + 0.5
-        out["Shmin_MPa"] = np.where(stress_valid, shmin_calc, np.nan)
-        out["SHmax_MPa"] = np.where(stress_valid, shmax_calc, np.nan)
+        stress_usable = stress_valid if apply_stress_screen else finite_stress
+        out["Shmin_MPa"] = np.where(stress_usable, shmin_calc, np.nan)
+        out["SHmax_MPa"] = np.where(stress_usable, shmax_calc, np.nan)
 
         out["Nu_Eff"] = nu_eff
         out["Sig_V_Eff_MPa"] = sig_v_eff / 1e6
@@ -656,6 +709,12 @@ class GeomechanicsCore:
         # Persist provenance in records so CSV, saved wells and PDF retain it.
         out["Calculation_Mode"] = calculation_mode
         out["Normal_Trend_Calibrated"] = bool(normal_trend_calibrated)
+        out["Log_Range_Filter_Applied"] = bool(apply_log_range_filter)
+        out["Pressure_Screen_Applied"] = bool(apply_pressure_screen)
+        out["Stress_Screen_Applied"] = bool(apply_stress_screen)
+        out["Property_Bounds_Applied"] = bool(apply_property_bounds)
+        out["Interpolation_Max_Gap"] = interpolation_max_gap
+        out["Units_Confirmed_By_User"] = bool(units_confirmed)
         out["Result_Use_Warning"] = (
             "EDUCATIONAL ONLY - NOT FOR ENGINEERING DECISIONS"
             if calculation_mode == "educational" else
@@ -933,14 +992,19 @@ class GeomechanicsCore:
 
         # A NaN pressure makes all failure comparisons false; without this guard,
         # the search could incorrectly report its first tested mud weight as safe.
-        valid_flag = row.get("Pore_Pressure_Estimate_Valid", None)
+        experimental_relaxed_pressure = (
+            row.get("Calculation_Mode") == "educational"
+            and (row.get("Experimental_Hydrostatic_Fallback_Used") == 1
+                 or row.get("Pressure_Screen_Applied") == False)
+        )
+        valid_flag = None if experimental_relaxed_pressure else row.get("Pore_Pressure_Estimate_Valid", None)
         if valid_flag is not None:
             if pd.isna(valid_flag) or float(valid_flag) != 1.0:
                 raise ValueError(
                     "Cannot calculate deviated-well stability: the selected depth has "
                     "an invalid or unavailable pore-pressure estimate (QC failed)."
                 )
-        qc_flag = row.get("Pore_Pressure_QC_Flag", None)
+        qc_flag = None if experimental_relaxed_pressure else row.get("Pore_Pressure_QC_Flag", None)
         if qc_flag is not None:
             if pd.isna(qc_flag) or float(qc_flag) != 0.0:
                 raise ValueError(
