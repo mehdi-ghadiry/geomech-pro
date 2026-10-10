@@ -75,6 +75,31 @@ class CalculationModeAPITests(unittest.TestCase):
             response = self.request(calculation_mode="educational", **extra)
             self.assertEqual(response.status_code, 422, response.text)
 
+    def test_quick_experimental_api_and_pdf_preserve_assumptions(self):
+        response = self.request(calculation_mode="educational", dts_col="", depth_reference="MD",
+                                dt_surface=180, dt_matrix=100, experimental_vertical_depth=True,
+                                experimental_vs_ratio=0.5, experimental_hydrostatic_fallback=True,
+                                apply_log_range_filter=False, apply_pressure_screen=False,
+                                apply_stress_screen=False, apply_property_bounds=False)
+        self.assertEqual(response.status_code, 200, response.text)
+        records = response.json()["results"]
+        self.assertEqual(records[0]["Experimental_Hydrostatic_Fallback_Used"], 1)
+        self.assertIn("ASSUMED", records[0]["Depth_Reference_Used"])
+        self.assertFalse(records[0]["Units_Confirmed_By_User"])
+        report = self.client.post("/api/v1/report/pdf", json={"results": records, "well_name": "SYNTHETIC DEMO"})
+        self.assertEqual(report.status_code, 200)
+        import re
+        import zlib
+        content = b""
+        for stream in re.findall(rb"stream\r?\n(.*?)\r?\nendstream", report.content, re.S):
+            try:
+                content += zlib.decompress(stream)
+            except zlib.error:
+                content += stream
+        self.assertIn(b"Assumed hydrostatic pressure substituted at 3 samples", content)
+        self.assertIn(b"Depth assumed vertical", content)
+        self.assertIn(b"Vs/Vp assumed", content)
+
 
 if __name__ == "__main__":
     unittest.main()

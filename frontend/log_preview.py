@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 EDUCATIONAL_WARNING = "EDUCATIONAL ONLY - NOT FOR ENGINEERING DECISIONS"
-TEXT_METADATA = {"Calculation_Mode", "Result_Use_Warning"}
+TEXT_METADATA = {"Calculation_Mode", "Result_Use_Warning", "Depth_Reference_Used", "Pore_Pressure_Source"}
 
 
 def find_shear_curve(columns):

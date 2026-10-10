@@ -43,3 +43,33 @@ Run regression tests from the repository root:
 python -m unittest discover -s tests -v
 ```
 Synthetic test fixtures demonstrate software behavior, not engineering validity.
+## Quick experimental testing vs. engineering mode
+
+The UI now starts in **Educational / experimental** mode. Upload and map depth,
+DT and RHOB to try the workflow without declaring field calibration. In this
+mode the log range filter, pressure upper screen, stress-regime screen and
+property bounds are optional. Internal-gap interpolation can be disabled or
+limited by sample count. Engineering mode retains the existing screening and
+normal-trend calibration requirement; declaring calibration alone does not
+guarantee accurate results or operational suitability.
+
+Experimental defaults explicitly assume a vertical well when depth is MD or
+unspecified, assume Vs/Vp = 0.5 only when DTS is missing (not an empirical
+lithology inference), and substitute hydrostatic pressure where the Eaton
+estimate cannot be used. Each assumption can be switched off. Depth is **not**
+trajectory-converted; hydrostatic substitution is **not** pressure calibration.
+Selected log units must still be supported; until verified they are assumptions.
+
+Raw Eaton results and QC flags are retained even when a screen is disabled or
+a hydrostatic fallback is used. Filter settings, assumed depth/pressure/Vs and
+calibration status survive CSV/saved records and are summarized in PDF reports.
+Charts retain the educational-only warning. Non-finite/non-positive input logs,
+unstable elastic pairs, unsupported units and unusable depth data still cannot
+be converted into valid data by switching filters off. No-window results are
+retained rather than made to look safe.
+
+These defaults are for software testing, **not engineering decisions**. For
+field analysis, select engineering mode, verify TVD and units, use measured
+logs, calibrate the normal-compaction trend and validate against local pressure,
+stress and rock-property data. LOT/FIT calibration remains optional and must
+use a genuine, applicable measurement.

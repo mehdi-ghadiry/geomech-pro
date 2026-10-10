@@ -121,6 +121,23 @@ def generate_pdf_report(
                           results_df["Normal_Trend_Calibrated"].eq(True).all())
         pdf.cell(0, 6, "Normal sonic trend: " + ("user-declared calibrated" if trend_declared else "UNCALIBRATED"), 0, 1, "L")
         pdf.cell(0, 6, "Experimental results; no independent field validation.", 0, 1, "L")
+        pdf.set_font("helvetica", "", 9)
+        for column, label in (
+            ("Log_Range_Filter_Applied", "Log range filter"),
+            ("Pressure_Screen_Applied", "Pressure upper screen"),
+            ("Stress_Screen_Applied", "Stress regime screen"),
+            ("Property_Bounds_Applied", "Property bounds"),
+            ("Units_Confirmed_By_User", "Units confirmed by user"),
+        ):
+            if column in results_df:
+                pdf.cell(0, 5, label + ": " + ("ON" if results_df[column].eq(True).all() else "OFF / unconfirmed"), 0, 1, "L")
+        if "Experimental_Hydrostatic_Fallback_Used" in results_df:
+            count = int(results_df["Experimental_Hydrostatic_Fallback_Used"].fillna(0).sum())
+            pdf.cell(0, 5, f"Assumed hydrostatic pressure substituted at {count} samples.", 0, 1, "L")
+        if "Depth_Reference_Used" in results_df and results_df["Depth_Reference_Used"].str.contains("ASSUMED", na=False).any():
+            pdf.cell(0, 5, "Depth assumed vertical; NOT converted from a measured trajectory.", 0, 1, "L")
+        if "Vs_Estimation_Method" in results_df and results_df["Vs_Estimation_Method"].str.contains("assumed", na=False).any():
+            pdf.cell(0, 5, "Vs/Vp assumed for software testing; NOT measured or lithology calibrated.", 0, 1, "L")
         pdf.ln(3)
 
     # Section 1: Executive Summary
